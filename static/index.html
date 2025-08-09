@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>কৃষক সহকারী চ্যাটবট</title>
+  <!-- cache-bust v=4 to force newest CSS -->
+  <link rel="stylesheet" href="/static/style.css?v=4"/>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>🌱 কৃষক সহকারী</h1>
+      <p class="sub">টেক্সট বা ভয়েসের মাধ্যমে কৃষি–সংক্রান্ত প্রশ্ন করুন।</p>
+    </header>
+
+    <main class="card" role="main" aria-label="চ্যাট ইন্টারফেস">
+      <div id="log" class="log" aria-live="polite" aria-label="চ্যাট বার্তা"></div>
+
+      <div class="controls">
+        <!-- Order: input → SEND (➤) → MIC (🎙 বলুন) → STOP (⏹ থামান) -->
+        <input id="msg" type="text" placeholder="এখানে লিখুন..." autocomplete="off" aria-label="বার্তা লিখুন"/>
+        <button id="send" type="button" title="পাঠান" aria-label="পাঠান">➤</button>
+        <button id="mic"  type="button" title="বলুন"  aria-label="বলুন">🎙 বলুন</button>
+        <button id="stop" type="button" title="থামান" aria-label="থামান">⏹ থামান</button>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
