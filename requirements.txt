@@ -1,4 +1,7 @@
 fastapi
 uvicorn
-google-generativeai
 python-dotenv
+gtts
+requests
+google-generativeai
+jinja2
