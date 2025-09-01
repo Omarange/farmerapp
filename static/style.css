@@ -1,126 +1,40 @@
-:root{
-  --bg:#f5f7f5;
-  --text:#1f2937;
-  --muted:#5b6b7a;
-  --panel:#ffffff;
-  --border:#e5e7eb;
-  --accent:#22c55e;        /* green */
-  --accent-strong:#16a34a; /* darker green */
-  --accent-soft:#e8f9ef;   /* user bubble bg */
-  --danger:#ef4444;        /* red */
-}
+<!DOCTYPE html>
+<html lang="bn" dir="ltr">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#22c55e">
+  <title>কৃষক সহকারী চ্যাটবট</title>
 
-*{box-sizing:border-box}
-body{
-  margin:0;
-  background:var(--bg);
-  color:var(--text);
-  font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;
-}
+  <!-- If API is on a different domain (Render), set it here -->
+  <!-- <script>window.CHAT_API_BASE="https://YOUR-RENDER-SERVICE.onrender.com";</script> -->
 
-.wrap{max-width:860px;margin:0 auto;padding:24px}
+  <link rel="stylesheet" href="/static/style.css?v=6"/>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>🌱 কৃষক সহকারী</h1>
+      <p class="sub">টেক্সট বা ভয়েসের মাধ্যমে কৃষি–সংক্রান্ত প্রশ্ন করুন।</p>
+    </header>
 
-header{margin:6px 0 18px}
-h1{margin:0 0 6px;font-weight:800}
-.sub{margin:0;color:var(--muted)}
+    <main class="card" role="main" aria-label="চ্যাট ইন্টারফেস">
+      <div id="log" class="log" role="log" aria-live="polite" aria-label="চ্যাট বার্তা"></div>
 
-.card{
-  background:var(--panel);
-  border:1px solid var(--border);
-  border-radius:16px;
-  padding:14px;
-  box-shadow:0 6px 18px rgba(16,24,40,.06);
-}
+      <div class="controls">
+        <input id="msg" type="text" placeholder="এখানে লিখুন..." autocomplete="off" aria-label="বার্তা লিখুন"/>
+        <button id="send" type="button" title="পাঠান" aria-label="পাঠান">➤</button>
+        <button id="mic"  type="button" title="বলুন"  aria-label="বলুন">🎙 বলুন</button>
+        <button id="stop" type="button" title="থামান" aria-label="থামান">⏹ থামান</button>
+      </div>
 
-.log{
-  height:62vh;min-height:360px;overflow:auto;
-  display:flex;flex-direction:column;gap:10px;padding:8px;
-}
+      <!-- Hidden native recorder fallback -->
+      <input id="micfile" type="file" accept="audio/*" capture="microphone" style="display:none">
+    </main>
+  </div>
 
-.msg{
-  max-width:72%;
-  padding:10px 12px;border-radius:14px;line-height:1.35;white-space:pre-wrap;
-}
-.user{align-self:flex-end;background:var(--accent-soft);border:1px solid #bdebcf}
-.bot{align-self:flex-start;background:#f3f4f6;border:1px solid var(--border)}
-
-/* ---------- Controls row & ordering ---------- */
-.controls{
-  display:flex;
-  gap:8px;
-  align-items:center;
-  width:100%;
-  margin-top:10px;
-  padding:6px 6px;                 /* keep content off the card edges */
-}
-
-/* Order: input → SEND → MIC → STOP  */
-#msg  { order:0; flex:1 1 auto; min-width:0; }
-#send { order:1; }
-#mic  { order:2; }
-#stop { order:3; }
-
-/* Normalize button look on mobile Safari/Chrome */
-button{ -webkit-appearance:none; appearance:none; }
-
-/* ---------- Input (rounded, comfy) ---------- */
-#msg{
-  background:#fff;
-  border:1.5px solid var(--border);
-  border-radius:20px;
-  padding:12px 14px;
-  color:var(--text);
-  box-shadow:inset 0 1px 2px rgba(16,24,40,.06);
-}
-#msg:focus{
-  outline:none;
-  border-color:var(--accent);
-  box-shadow:0 0 0 3px rgba(34,197,94,.18), inset 0 1px 2px rgba(16,24,40,.06);
-}
-
-/* ---------- SEND (➤) — circular & non-shrinking ---------- */
-#send{
-  flex:0 0 44px;
-  width:44px; min-width:44px;
-  height:44px; aspect-ratio:1/1;
-  border-radius:50%;
-  background:var(--accent);
-  color:#fff; border:0;
-  font-size:1.15rem; line-height:1;
-  display:inline-flex; align-items:center; justify-content:center;
-  cursor:pointer; padding:0; font-weight:700;
-  box-shadow:0 4px 10px rgba(34,197,94,.25);
-}
-#send:hover{ background:var(--accent-strong); }
-
-/* ---------- MIC — rectangular pill ---------- */
-#mic{
-  flex:0 0 auto;
-  height:44px;
-  background:var(--accent-strong);
-  color:#fff; border:0; border-radius:10px;
-  padding:0 14px; font-weight:700; cursor:pointer; white-space:nowrap;
-  display:inline-flex; align-items:center; justify-content:center;
-}
-#mic:hover{ background:#15803d; }
-
-/* ---------- STOP — rectangular pill ---------- */
-#stop{
-  flex:0 0 auto;
-  height:44px;
-  background:var(--danger);
-  color:#fff; border:0; border-radius:10px;
-  padding:0 14px; font-weight:700; cursor:pointer; white-space:nowrap;
-  display:inline-flex; align-items:center; justify-content:center;
-}
-#stop:hover{ background:#b91c1c; }
-
-button:disabled{ opacity:.6; cursor:not-allowed; }
-
-/* ---------- Small screens: wrap so STOP never clips ---------- */
-@media (max-width:420px){
-  .controls{ flex-wrap:wrap; gap:6px; }
-  #msg{ flex:1 1 100%; min-width:100%; margin-bottom:6px; }
-  #send{ width:40px; min-width:40px; height:40px; }
-  #mic, #stop{ height:40px; padding:0 10px; font-size:.95rem; }
-}
+  <script src="/static/app.js?v=6"></script>
+</body>
+</html>
