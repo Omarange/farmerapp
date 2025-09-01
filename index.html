@@ -1,56 +1,41 @@
-# add at top with the other imports
-from fastapi.responses import HTMLResponse, PlainTextResponse
-import logging
-logger = logging.getLogger("uvicorn.error")
-
-# keep your existing BASE_DIR, STATIC_DIR, INDEX_PATH
-# e.g.
-# BASE_DIR = Path(__file__).parent
-# STATIC_DIR = BASE_DIR / "static"
-# INDEX_PATH = BASE_DIR / "index.html"
-
-@app.get("/", response_class=HTMLResponse)
-def site():
-    try:
-        if INDEX_PATH.exists():
-            return FileResponse(str(INDEX_PATH))  # use str for Windows safety
-        # Fallback inline HTML if index.html missing
-        logger.warning("index.html NOT FOUND at %s", INDEX_PATH)
-        return HTMLResponse(f"""<!doctype html>
-<html lang="bn">
+<!DOCTYPE html>
+<html lang="bn" dir="ltr">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>কৃষক সহকারী</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#22c55e">
+  <title>কৃষক সহকারী চ্যাটবট</title>
+
+  <!-- If UI is on Render (same origin), leave BASE empty.
+       If UI is hosted elsewhere (e.g., happymonster), set it to your Render URL: -->
+  <!-- <script>window.CHAT_API_BASE="https://YOUR-SERVICE.onrender.com";</script> -->
+
+  <link rel="stylesheet" href="/static/style.css?v=7"/>
 </head>
 <body>
   <div class="wrap">
-    <header><h1>🌱 কৃষক সহকারী</h1><p class="sub">অস্থায়ী হোমপেজ (index.html পাওয়া যায়নি)</p></header>
-    <main class="card">
-      <div id="log" class="log"></div>
+    <header>
+      <h1>🌱 কৃষক সহকারী</h1>
+      <p class="sub">টেক্সট বা ভয়েসের মাধ্যমে কৃষি–সংক্রান্ত প্রশ্ন করুন।</p>
+    </header>
+
+    <main class="card" role="main" aria-label="চ্যাট ইন্টারফেস">
+      <div id="log" class="log" role="log" aria-live="polite" aria-label="চ্যাট বার্তা"></div>
+
       <div class="controls">
-        <input id="msg" placeholder="এখানে লিখুন..."><button id="send">➤</button>
-        <button id="mic">🎙 বলুন</button><button id="stop">⏹ থামান</button>
+        <input id="msg" type="text" placeholder="এখানে লিখুন..." autocomplete="off" aria-label="বার্তা লিখুন"/>
+        <button id="send" type="button" title="পাঠান" aria-label="পাঠান">➤</button>
+        <button id="mic"  type="button" title="বলুন"  aria-label="বলুন">🎙 বলুন</button>
+        <button id="stop" type="button" title="থামান" aria-label="থামান">⏹ থামান</button>
       </div>
+
+      <!-- Hidden native recorder fallback -->
+      <input id="micfile" type="file" accept="audio/*" capture="microphone" style="display:none">
     </main>
   </div>
-  <script>window.CHAT_API_BASE = '';</script>
-  <script src="/static/app.js"></script>
-</body>
-</html>""")
-    except Exception as e:
-        logger.exception("Error serving /: %s", e)
-        return PlainTextResponse("Homepage error: " + str(e), status_code=500)
 
-# Diagnostic endpoint to see resolved paths on Render
-@app.get("/__diag", response_class=PlainTextResponse)
-def diag():
-    lines = [
-        f"cwd={Path.cwd()}",
-        f"__file__={__file__}",
-        f"BASE_DIR={BASE_DIR}",
-        f"STATIC_DIR={STATIC_DIR} exists={STATIC_DIR.exists()} list={list(STATIC_DIR.glob('*')) if STATIC_DIR.exists() else 'N/A'}",
-        f"INDEX_PATH={INDEX_PATH} exists={INDEX_PATH.exists()}",
-    ]
-    return "\n".join(map(str, lines))
+  <script src="/static/app.js?v=7"></script>
+</body>
+</html>
