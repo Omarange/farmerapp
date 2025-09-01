@@ -1,7 +1,8 @@
 fastapi
-uvicorn
+uvicorn[standard]
 python-dotenv
-gtts
-requests
 google-generativeai
-jinja2
+google-api-core
+gTTS
+google-cloud-speech
+ffmpeg-python
