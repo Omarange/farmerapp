@@ -28,21 +28,49 @@ load_dotenv()
 
 # Accept either "models/gemini-1.5-*" or "gemini-1.5-*"
 _RAW_MODEL = os.getenv("MODEL_NAME", "gemini-1.5-pro").strip()
-MODEL_NAME = _RAW_MODEL.replace("models/", "")  # normalize to SDK's expected form
+MODEL_NAME = _RAW_MODEL.replace("models/", "")  # normalize for SDK
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-# Optional regional STT endpoint (e.g., "asia-south1-speech.googleapis.com")
+# Optional: pin STT region (e.g., "asia-south1-speech.googleapis.com")
 GOOGLE_SPEECH_ENDPOINT = os.getenv("GOOGLE_SPEECH_ENDPOINT", "").strip()
 
 def _ensure_google_creds():
-    """Allow creds via GOOGLE_APPLICATION_CREDENTIALS_JSON (Render-friendly)."""
+    """
+    Allow creds via:
+      - GOOGLE_APPLICATION_CREDENTIALS (file path)  [no-op]
+      - GOOGLE_APPLICATION_CREDENTIALS_JSON (raw JSON OR base64 JSON)
+      - GOOGLE_APPLICATION_CREDENTIALS_B64 (base64 JSON)
+    The function writes a temp file and points GOOGLE_APPLICATION_CREDENTIALS to it.
+    """
     if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         return
+
     raw_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    b64_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
+
+    content = None
     if raw_json:
+        s = raw_json.strip()
+        if s.startswith("{"):            # looks like raw JSON
+            content = s
+        else:
+            # treat as base64 if it doesn't start with "{"
+            try:
+                content = base64.b64decode(s).decode("utf-8")
+            except Exception:
+                # last resort: use as-is
+                content = s
+    elif b64_json:
+        try:
+            content = base64.b64decode(b64_json.strip()).decode("utf-8")
+        except Exception as e:
+            print("Bad GOOGLE_APPLICATION_CREDENTIALS_B64:", e)
+            content = None
+
+    if content:
         path = "/tmp/gcp_creds.json"
         with open(path, "w", encoding="utf-8") as f:
-            f.write(raw_json.strip())
+            f.write(content)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
 
 if _GCP_OK:
@@ -62,7 +90,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve the existing static UI
+# Serve static UI
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -92,7 +120,7 @@ def synthesize_tts(text: str, language: str = "bn-BD") -> Optional[str]:
         print("TTS error:", e)
         return None
 
-# ---------- Helpers: Greeting / Cleanup (kept like your previous zip) ----------
+# ---------- Helpers: Greeting / Cleanup (same prompts/logic as before) ----------
 _GREETING_WORDS = [
     "hello", "hi", "hey", "assalamu alaikum", "assalamualaikum", "salam",
     "হ্যালো", "হাই", "হেই", "আসসালামু আলাইকুম", "সালাম", "স্বাগতম", "নমস্কার", "নমস্তে"
@@ -113,7 +141,6 @@ def strip_banned_greetings(s: str) -> str:
     if not s: return s
     s = s.strip()
     for opener in _BANNED_OPENERS:
-        # remove at line start
         if s.startswith(opener):
             s = s[len(opener):].lstrip(" ,।!-\n")
     return s
@@ -218,7 +245,7 @@ def google_stt_bytes(audio_bytes: bytes, content_type: str, language_code: str =
 
     return "", debug
 
-# ---------- API: Chat (prompts SAME as your previous zip’s intent) ----------
+# ---------- API: Chat (same prompt/behavior as your previous one) ----------
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     if not GEMINI_API_KEY:
@@ -228,13 +255,13 @@ def chat(req: ChatRequest):
     if not user_msg:
         return JSONResponse({"answer": "বার্তা খালি। কিছু লিখুন বা বলুন।", "audio_b64": None})
 
-    # 1) Greeting-only → local Bangla greeting (no model call), as before
+    # 1) Greeting-only → local Bangla greeting (no model call)
     if is_greeting_only(user_msg):
-        text = "স্বাগতম! আপনার ফসল, আবহাওয়া বা কৃষি সমস্যা লিখুন/বলুন—আমি সংক্ষিপ্ত, কাজে লাগার মতো পরামর্শ দেব।"
+        text = "স্বাগতম! আপনার ফসল, আবহাওয়া বা কৃষি সমস্যা লিখুন/বলুন—আমি ৩–৫টি সংক্ষিপ্ত, কাজে লাগার মতো পরামর্শ দেব।"
         audio_b64 = synthesize_tts(text, language=req.language or "bn-BD") if req.from_mic else None
         return {"answer": text, "audio_b64": audio_b64}
 
-    # 2) Gemini call with SAME prompt style (Bangla-only, 3–5 concise sentences, no filler)
+    # 2) Gemini call with same prompt style (Bangla-only, 3–5 concise sentences)
     sys_prompt = (
         "তুমি একজন কৃষি সহায়ক। সবসময় বাংলায় উত্তর দেবে। "
         "৩–৫টি সংক্ষিপ্ত বাক্যে সরাসরি, কাজের মতো পরামর্শ দেবে। "
@@ -264,7 +291,7 @@ def chat(req: ChatRequest):
     audio_b64 = synthesize_tts(text, language=req.language or "bn-BD") if req.from_mic else None
     return {"answer": text, "audio_b64": audio_b64}
 
-# ---------- API: STT (Google only) ----------
+# ---------- API: STT (Google) ----------
 @app.post("/api/stt")
 async def stt(request: Request, audio: UploadFile = File(...), lang: Optional[str] = Form("bn-BD")):
     """
@@ -280,7 +307,7 @@ async def stt(request: Request, audio: UploadFile = File(...), lang: Optional[st
             return JSONResponse(resp, status_code=400)
 
         content_type = (audio.content_type or "").lower()
-        if content_type == "video/webm":  # normalize WebView quirk
+        if content_type == "video/webm":  # some webviews label mic as video/webm
             content_type = "audio/webm"
 
         text, dbg = google_stt_bytes(data, content_type, language_code=lang or "bn-BD")
