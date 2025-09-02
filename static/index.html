@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>মৌসুম কৃষি সহায়ক</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="icon" href="data:," />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🌾</span>
+      <div class="titles">
+        <h1>মৌসুম কৃষি সহায়ক</h1>
+        <p class="subtitle">স্থানীয় আবহাওয়া ও ফসলের পরামর্শ — বাংলায়</p>
+      </div>
+    </div>
+    <!-- status pill removed -->
+  </header>
+
+  <main class="chatwrap">
+    <!-- Chat log -->
+    <section id="log" class="log" role="log" aria-live="polite"></section>
+
+    <!-- Composer -->
+    <form class="composer" onsubmit="return false;">
+      <label class="sr-only" for="msg">বার্তা লিখুন</label>
+      <textarea id="msg" rows="2" placeholder="বার্তা লিখুন… অথবা 🎙 ‘বলুন’ ট্যাপ করুন"></textarea>
+
+      <div class="actions">
+        <button id="mic" type="button" class="btn mic" title="বলুন (ভয়েস)">🎙 বলুন</button>
+        <button id="send" type="button" class="btn send" title="পাঠান">➤ পাঠান</button>
+        <button id="stop" type="button" class="btn stop" title="থামান">⏹ থামান</button>
+      </div>
+
+      <p class="hint">টিপস: ৫–১০ সেকেন্ড স্পষ্টভাবে বলুন। মাইক্রোফোন চালু করতে অনুমতি দিন।</p>
+    </form>
+  </main>
+
+  <!-- footer disclaimer removed -->
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
