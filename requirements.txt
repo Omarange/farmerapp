@@ -1,9 +1,0 @@
-fastapi
-uvicorn[standard]
-python-dotenv
-google-generativeai
-google-api-core
-gTTS
-google-cloud-speech
-ffmpeg-python
-python-multipart
