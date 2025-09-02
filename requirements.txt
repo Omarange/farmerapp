@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-dotenv
+gtts
+requests
+google-generativeai
+jinja2
+python-multipart
+google-cloud-speech
