@@ -13,6 +13,15 @@ let busy = false;
 let currentController = null;
 let mediaStream = null;
 let mediaRecorder = null;
+let isRecording = false;
+let recMode = null; // 'media' | 'wav'
+let recChunks = null;
+let recStopPromise = null;
+let recStopResolve = null;
+let recStopReject = null;
+let recMime = '';
+let wavCtx = null, wavSrc = null, wavProc = null, wavBuffers = null;
+let recordingSafetyTimer = null;
 let audioEl = null;
 
 function addBubble(role, text){
@@ -110,7 +119,7 @@ async function recordWAVFallback(seconds=7){
 
 /* ---------- Try MediaRecorder (webm/ogg). If unsupported → WAV fallback. ---------- */
 function showRecordingStart(){
-  addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
+  addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… বোতাম চেপে ধরে কথা বলুন, ছেড়ে দিন পাঠাতে।");
 }
 
 async function recordAudioBlob(){
@@ -155,7 +164,6 @@ async function recordAudioBlob(){
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
     showRecordingStart();
     mediaRecorder.start();
-    setTimeout(()=>{ try{ mediaRecorder.stop(); }catch{} }, 7000);
     mediaRecorder.onstop = ()=>{
       mediaStream.getTracks().forEach(t=>t.stop());
       const blob = new Blob(chunks, {type: mime});
@@ -186,6 +194,156 @@ async function startServerSTT(){
   throw new Error("empty-transcript");
 }
 
+// Upload a blob to server STT
+async function sttFromBlob(blob){
+  const fd = new FormData();
+  const type = blob.type || "application/octet-stream";
+  const fileName =
+    type.includes("ogg") ? "clip.ogg" :
+    type.includes("webm") ? "clip.webm" :
+    type.includes("wav") ? "clip.wav" : "clip.wav";
+  fd.append("audio", blob, fileName);
+  fd.append("lang", "bn-BD");
+  const r = await fetch(API_STT, { method: "POST", body: fd });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const data = await r.json();
+  if (data && data.text !== undefined) return data.text || "";
+  if (data && data.error) throw new Error(data.error);
+  throw new Error("empty-transcript");
+}
+
+// Press-to-talk: start recording on press
+async function beginPressToTalk(){
+  if (busy || isRecording) return false;
+  // HTTPS check
+  if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1"){
+    addBubble("bot","🔒 এই ব্রাউজারে মাইক্রোফোন চালাতে HTTPS দরকার।");
+    return false;
+  }
+
+  let stream;
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({audio:true});
+  }catch{
+    addBubble("bot","মাইক্রোফোন অনুমতি দেওয়া হয়নি।");
+    return false;
+  }
+
+  // Pick best mime
+  const mimeCandidates = [
+    'audio/webm;codecs=opus','audio/webm','video/webm;codecs=opus','video/webm','audio/ogg;codecs=opus','audio/ogg'
+  ];
+  let mime = '';
+  if (window.MediaRecorder){
+    for (const m of mimeCandidates){ if (MediaRecorder.isTypeSupported(m)){ mime = m; break; } }
+  }
+
+  isRecording = true;
+  btnMic.classList.add('recording');
+  showRecordingStart();
+  recordingSafetyTimer = setTimeout(()=>{ if (isRecording) finishPressToTalk(true); }, 60000);
+
+  if (window.MediaRecorder && mime){
+    recMode = 'media';
+    mediaStream = stream;
+    mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime });
+    recMime = mime;
+    recChunks = [];
+    recStopPromise = new Promise((res, rej)=>{ recStopResolve = res; recStopReject = rej; });
+    mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) recChunks.push(e.data); };
+    mediaRecorder.onerror = e => { try{ recStopReject(e.error || new Error('recorder-error')); }catch{} };
+    mediaRecorder.onstop = ()=>{
+      try{ mediaStream.getTracks().forEach(t=>t.stop()); }catch{}
+      try{
+        const blob = new Blob(recChunks, {type: recMime});
+        if (!blob || blob.size === 0) return recStopReject(new Error('empty-blob'));
+        recStopResolve(blob);
+      }catch(err){ recStopReject(err); }
+    };
+    mediaRecorder.start();
+    return true;
+  }
+
+  // WAV fallback (ScriptProcessor)
+  recMode = 'wav';
+  mediaStream = stream;
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  wavCtx = new AudioCtx();
+  if (wavCtx.state === 'suspended') await wavCtx.resume();
+  wavSrc = wavCtx.createMediaStreamSource(mediaStream);
+  wavProc = wavCtx.createScriptProcessor(4096, 2, 1);
+  wavBuffers = [];
+  wavProc.onaudioprocess = (e)=>{
+    const L = e.inputBuffer.getChannelData(0);
+    const R = e.inputBuffer.numberOfChannels>1 ? e.inputBuffer.getChannelData(1) : L;
+    const mono = new Float32Array(L.length);
+    for (let i=0;i<L.length;i++) mono[i] = (L[i]+R[i])*0.5;
+    wavBuffers.push(mono);
+  };
+  wavSrc.connect(wavProc); wavProc.connect(wavCtx.destination);
+  recStopPromise = new Promise((res, rej)=>{ recStopResolve = res; recStopReject = rej; });
+  return true;
+}
+
+async function finishPressToTalk(send=true){
+  if (!isRecording) return;
+  clearTimeout(recordingSafetyTimer); recordingSafetyTimer = null;
+  try{
+    if (recMode === 'media' && mediaRecorder){
+      try{ mediaRecorder.stop(); }catch{}
+    } else if (recMode === 'wav'){
+      try{ if (wavProc) wavProc.disconnect(); if (wavSrc) wavSrc.disconnect(); }catch{}
+      try{ if (mediaStream) mediaStream.getTracks().forEach(t=>t.stop()); }catch{}
+      try{
+        let len = wavBuffers.reduce((a,c)=>a+c.length,0);
+        const merged = new Float32Array(len); let off=0;
+        for (const c of wavBuffers){ merged.set(c,off); off+=c.length; }
+        const blob = encodeWAVFromFloat32(merged, wavCtx.sampleRate);
+        recStopResolve(blob);
+      }catch(err){ recStopReject(err); }
+      try{ await wavCtx.close(); }catch{}
+    }
+  } finally {
+    // wait for blob
+    let blob = null;
+    try{
+      blob = await recStopPromise;
+    }catch(err){
+      // swallow
+    }
+    // cleanup
+    isRecording = false;
+    recMode = null;
+    recChunks = null;
+    recStopPromise = null; recStopResolve = null; recStopReject = null;
+    recMime = '';
+    wavCtx = null; wavSrc = null; wavProc = null; wavBuffers = null;
+    btnMic.classList.remove('recording');
+
+    if (!send || !blob){
+      return;
+    }
+
+    try{
+      const transcript = await sttFromBlob(blob);
+      if (transcript){
+        input.value = transcript;
+        sendMessage(transcript, true);
+      } else {
+        addBubble("bot","আপনার কথা বুঝতে পারিনি। আবার বলুন।");
+      }
+    }catch(e){
+      console.error(e);
+      addBubble("bot","ভয়েস ইনপুটে সমস্যা হয়েছে। আবার চেষ্টা করুন।");
+    }
+  }
+}
+
+async function cancelRecording(){
+  await finishPressToTalk(false);
+  addBubble("bot","রেকর্ডিং বাতিল হয়েছে।");
+}
+
 /* ---------- UI ---------- */
 btnSend.addEventListener("click", () => {
   if (!input.value.trim()) return;
@@ -198,25 +356,39 @@ input.addEventListener("keydown", (e)=>{
     sendMessage(input.value.trim(), false);
   }
 });
-btnMic.addEventListener("click", async ()=>{
-  if (busy) return;
-  try{
-    const transcript = await startServerSTT();
-    if (transcript){
-      input.value = transcript;
-      sendMessage(transcript, true);
-    } else {
-      addBubble("bot","আপনার কথা বুঝতে পারিনি। আবার বলুন।");
-    }
-  }catch(e){
-    console.error(e);
-    addBubble("bot","ভয়েস ইনপুটে সমস্যা হয়েছে। আবার চেষ্টা করুন।");
-  }
+// Press-and-hold handlers
+btnMic.addEventListener('pointerdown', async (e)=>{
+  if (busy || isRecording) return;
+  try{ btnMic.setPointerCapture(e.pointerId); }catch{}
+  e.preventDefault();
+  await beginPressToTalk();
+  btnMic.setAttribute('aria-pressed','true');
 });
-btnStop.addEventListener("click", ()=>{
+btnMic.addEventListener('pointerup', async (e)=>{
+  if (!isRecording) return;
+  try{ btnMic.releasePointerCapture(e.pointerId); }catch{}
+  e.preventDefault();
+  await finishPressToTalk(true);
+  btnMic.setAttribute('aria-pressed','false');
+});
+btnMic.addEventListener('pointercancel', async (e)=>{
+  if (!isRecording) return;
+  try{ btnMic.releasePointerCapture(e.pointerId); }catch{}
+  e.preventDefault();
+  await cancelRecording();
+  btnMic.setAttribute('aria-pressed','false');
+});
+btnMic.addEventListener('pointerleave', async ()=>{
+  if (!isRecording) return;
+  await cancelRecording();
+  btnMic.setAttribute('aria-pressed','false');
+});
+btnStop.addEventListener("click", async ()=>{
+  if (isRecording){
+    await cancelRecording();
+    return;
+  }
   if (currentController){ try{ currentController.abort(); }catch{} currentController = null; }
-  try{ if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop(); }catch{}
-  try{ if (mediaStream) mediaStream.getTracks().forEach(t=>t.stop()); }catch{}
   if (audioEl){ try{ audioEl.pause(); }catch{} audioEl = null; }
   busy = false; setBtnsDisabled(false);
   addBubble("bot","⏹ থেমে গেছে।");
