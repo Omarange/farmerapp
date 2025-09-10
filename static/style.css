@@ -154,7 +154,8 @@ body{
 .chip:disabled{ opacity: .55; cursor: not-allowed; }
 
 /* Quick chips rendered as a chat bubble */
-.quick-bubble{ width: fit-content; max-width: min(92%, 680px); padding: 6px 8px; margin: 4px 4px; }
+.quick-bubble{ display: inline-block; width: auto; max-width: 100%; padding: 4px 0; margin: 4px 0; background: transparent; border: 0; box-shadow: none; }
+.msg.quick-bubble, .msg.bot.quick-bubble{ background: transparent; border: 0; }
 .quick-bubble .quick{ justify-content: flex-start; gap: 6px; }
 .btn{
   appearance: none;

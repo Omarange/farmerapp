@@ -33,7 +33,10 @@ function addBubble(role, text){
   log.scrollTop = log.scrollHeight;
 }
 function setBtnsDisabled(disabled){
-  [btnSend, btnMic, btnStop].forEach(b => b && (b.disabled = disabled));
+  if (btnSend) btnSend.disabled = disabled;
+  if (btnMic) btnMic.disabled = disabled;
+  // Keep Stop enabled so it can cancel an in-flight request or recording
+  if (btnStop) btnStop.disabled = false;
   if (input) input.disabled = disabled;
   // disable any quick chips in the log
   if (log){
@@ -70,9 +73,13 @@ async function sendMessage(text, fromMic=false){
     addBubble("bot", (data && data.answer) ? data.answer : "উত্তর পাওয়া যায়নি।");
     if (data && data.audio_b64) playBase64Mp3(data.audio_b64);
   }catch(e){
-    addBubble("bot","সার্ভারে সংযোগে সমস্যা হয়েছে।");
+    if (e && (e.name === 'AbortError' || (typeof e.message === 'string' && e.message.toLowerCase().includes('abort')))){
+      addBubble("bot","⏹ থামানো হয়েছে।");
+    } else {
+      addBubble("bot","সার্ভারে সংযোগে সমস্যা হয়েছে।");
+    }
   }finally{
-    busy = false; setBtnsDisabled(false);
+    busy = false; setBtnsDisabled(false); currentController = null;
   }
 }
 
