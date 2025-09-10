@@ -58,9 +58,8 @@ body{
   margin: 8px auto 0; /* tighter top, no bottom space */
   padding: 0 12px;
   display: grid;
-  grid-template-rows: 1fr auto; /* log grows, composer sits at bottom */
+  grid-template-rows: auto auto; /* log fits content, no extra gap */
   gap: 4px; /* tighter */
-  min-height: 100%;
 }
 
 /* Log */
@@ -236,8 +235,16 @@ body{
   .composer{ padding: 8px; border-radius: 14px; }
   .actions{ gap: 6px; }
   .btn{ padding: 7px 10px; border-radius: 9px; }
-  .log{ max-height: 50vh; }
+  .log{ max-height: none; min-height: 0; }
   .btn.mic{ width: var(--mic-size-sm); height: var(--mic-size-sm); font-size: 16px; }
   .btn.send, .btn.stop{ min-width: 96px; height: 38px; }
   body{ font-size: 14px; line-height: 1.4; }
+  /* Cap chat area to ~2/3 of the screen */
+  .chatwrap{ height: 66.67dvh; max-height: 66.67dvh; grid-template-rows: 1fr auto; }
+}
+
+/* Slightly larger phones */
+@media (max-width: 768px) and (min-width: 521px){
+  .chatwrap{ height: 66.67dvh; max-height: 66.67dvh; grid-template-rows: 1fr auto; }
+  .log{ max-height: none; min-height: 0; }
 }
