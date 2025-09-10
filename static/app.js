@@ -28,6 +28,7 @@ const AUDIO_CONSTRAINTS = {
     // Avoid strict channel/sample constraints which can fail on some devices
   }
 };
+const IS_ANDROID = /Android/i.test(navigator.userAgent || "");
 
 function addBubble(role, text){
   const div = document.createElement("div");
@@ -176,69 +177,46 @@ async function recordAudioBlob(){
     }
   }
 
+  // Prefer WAV path on Android for better gain control and reliability
+  if (IS_ANDROID){
+    try { stream.getTracks().forEach(t=>t.stop()); } catch {}
+    return recordWAVFallback(7);
+  }
+
   if (!window.MediaRecorder || !mime){
     try { stream.getTracks().forEach(t=>t.stop()); } catch {}
     return recordWAVFallback(7);
   }
 
-  // Try boosted path first; if it fails/empty, fall back to direct stream, then WAV.
-  async function recordWithStream(recStream, boosted){
-    return await new Promise((resolve, reject)=>{
-      mediaStream = stream;
-      let ctx, src, gain;
-      if (boosted){
-        // keep references only to close after stop
-        ctx = recStream.__ctx;
-        src = recStream.__src;
-        gain = recStream.__gain;
-      }
-      mediaRecorder = new MediaRecorder(recStream, { mimeType: mime });
-      chunks = [];
-      mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
-      addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
-      mediaRecorder.start();
-      setTimeout(()=>{ try{ mediaRecorder.stop(); }catch{} }, 7000);
-      mediaRecorder.onstop = async ()=>{
-        try{ mediaStream.getTracks().forEach(t=>t.stop()); }catch{}
-        if (boosted){ try{ src.disconnect(); gain.disconnect(); }catch{} try{ ctx && ctx.close(); }catch{} }
-        const blob = new Blob(chunks, {type: mime});
-        if (!blob || blob.size === 0){
-          return reject(new Error("empty-blob"));
-        }
-        resolve(blob);
-      };
-      mediaRecorder.onerror = e => reject(e.error || new Error("recorder-error"));
-    });
-  }
-
-  // Build boosted graph; if it throws, skip boosting.
-  try{
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    const ctx = new AudioCtx();
-    if (ctx.state === "suspended") await ctx.resume();
-    const src = ctx.createMediaStreamSource(stream);
-    const gain = ctx.createGain();
-    gain.gain.value = MIC_GAIN;
-    const dest = ctx.createMediaStreamDestination();
-    src.connect(gain);
-    gain.connect(dest);
-    // attach refs so we can close later inside recorder stop
-    dest.__ctx = ctx; dest.__src = src; dest.__gain = gain;
+  // Direct MediaRecorder (simpler, more compatible). If it fails, WAV fallback.
+  return await new Promise((resolve, reject)=>{
+    mediaStream = stream;
     try{
-      return await recordWithStream(dest.stream, /*boosted*/true);
-    }catch(err){
-      // fall through to direct stream
+      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime });
+    }catch(e){
+      try { stream.getTracks().forEach(t=>t.stop()); } catch {}
+      recordWAVFallback(7).then(resolve).catch(reject);
+      return;
     }
-  }catch{
-    // ignore and fall back
-  }
-
-  try{
-    return await recordWithStream(stream, /*boosted*/false);
-  }catch{
-    try { stream.getTracks().forEach(t=>t.stop()); } catch {}
-    return recordWAVFallback(7);
-  }
+    chunks = [];
+    mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
+    mediaRecorder.start();
+    setTimeout(()=>{ try{ mediaRecorder.stop(); }catch{} }, 7000);
+    mediaRecorder.onstop = ()=>{
+      try{ mediaStream.getTracks().forEach(t=>t.stop()); }catch{}
+      const blob = new Blob(chunks, {type: mime});
+      if (!blob || blob.size === 0){
+        recordWAVFallback(7).then(resolve).catch(reject);
+        return;
+      }
+      resolve(blob);
+    };
+    mediaRecorder.onerror = ()=>{
+      try { stream.getTracks().forEach(t=>t.stop()); } catch {}
+      recordWAVFallback(7).then(resolve).catch(reject);
+    };
+  });
 }
 
 async function startServerSTT(rid){
@@ -252,8 +230,8 @@ async function startServerSTT(rid){
   fd.append("audio", blob, fileName);
   fd.append("lang", "bn-BD");
 
-  // Add '?debug=1' to inspect server detection if needed
-  const r = await fetch(API_STT /* + '?debug=1' */, { method: "POST", body: fd, headers: {"X-Request-ID": rid || genRid()} });
+  // Include debug=1 so server returns sniff/tried info
+  const r = await fetch(API_STT + '?debug=1', { method: "POST", body: fd, headers: {"X-Request-ID": rid || genRid()} });
   const data = await r.json();
   if (data && data.text !== undefined) return data.text || "";
   if (data && data.error) throw new Error(data.error);
