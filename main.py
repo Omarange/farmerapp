@@ -3,6 +3,11 @@ import io
 import base64
 import re
 from typing import Optional, Tuple
+from datetime import datetime, timezone
+import time
+import uuid
+import csv
+import threading
 
 from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,6 +38,61 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 # Optional: pin STT region (e.g., "asia-south1-speech.googleapis.com")
 GOOGLE_SPEECH_ENDPOINT = os.getenv("GOOGLE_SPEECH_ENDPOINT", "").strip()
+
+# ---------- Tracing (CSV) ----------
+def _truthy(s: str) -> bool:
+    return str(s or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+TRACE_CHAT = _truthy(os.getenv("TRACE_CHAT", "0"))
+_DEFAULT_TRACE_PATH = "/data/chat_traces.csv" if os.path.isdir("/data") else ""
+TRACE_CSV_PATH = os.getenv("TRACE_CSV_PATH", _DEFAULT_TRACE_PATH).strip()
+_TRACE_LOCK = threading.Lock()
+_TRACE_HEADER = [
+    "ts", "route", "req_id", "from_mic", "lang", "model", "latency_ms",
+    "user_len", "answer_len", "status", "user", "answer"
+]
+
+def _sanitize_text(s: Optional[str], limit: int = 500) -> str:
+    if not s:
+        return ""
+    s = str(s).replace("\n", " ").replace("\r", " ").strip()
+    if len(s) > limit:
+        return s[:limit] + "…"
+    return s
+
+def _trace_chat_csv(row: dict):
+    if not TRACE_CHAT:
+        return
+    # ensure directory
+    if TRACE_CSV_PATH:
+        try:
+            os.makedirs(os.path.dirname(TRACE_CSV_PATH), exist_ok=True)
+        except Exception:
+            pass
+    out = [
+        row.get("ts", ""), row.get("route", ""), row.get("req_id", ""),
+        row.get("from_mic", False), row.get("lang", ""), row.get("model", ""),
+        row.get("latency_ms", 0), row.get("user_len", 0), row.get("answer_len", 0),
+        row.get("status", ""), row.get("user", ""), row.get("answer", ""),
+    ]
+    wrote = False
+    try:
+        if TRACE_CSV_PATH:
+            need_header = not os.path.exists(TRACE_CSV_PATH)
+            with _TRACE_LOCK:
+                with open(TRACE_CSV_PATH, "a", encoding="utf-8", newline="") as f:
+                    w = csv.writer(f)
+                    if need_header:
+                        w.writerow(_TRACE_HEADER)
+                    w.writerow(out)
+                    wrote = True
+    except Exception:
+        wrote = False
+    if not wrote:
+        try:
+            print("csv_trace," + ",".join([str(x).replace("\n", " ") for x in out]), flush=True)
+        except Exception:
+            pass
 
 def _ensure_google_creds():
     """
@@ -168,6 +228,8 @@ def strip_banned_greetings(s: str) -> str:
             s = s[len(opener):].lstrip(" ,।!-\n")
     return s
 
+# ---------- Tracing helpers are defined above ----------
+
 # ---------- Helpers: Google STT ----------
 def sniff_audio_format(b: bytes) -> str:
     if not b or len(b) < 4:
@@ -280,17 +342,41 @@ def google_stt_bytes(audio_bytes: bytes, content_type: str, language_code: str =
 # ---------- API: Chat (same prompt/behavior as your previous one) ----------
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
+    req_id = uuid.uuid4().hex
+    t0 = time.time()
+    model_used = MODEL_NAME
     if not GEMINI_API_KEY:
+        _trace_chat_csv({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "route": "/api/chat", "req_id": req_id, "from_mic": bool(req.from_mic),
+            "lang": req.language or "bn-BD", "model": model_used, "latency_ms": int((time.time()-t0)*1000),
+            "user_len": len(req.message or ""), "answer_len": 0, "status": "no_key",
+            "user": _sanitize_text(req.message), "answer": ""
+        })
         return {"answer": "⚠️ GEMINI_API_KEY সেট করা নেই।", "audio_b64": None}
 
     user_msg = (req.message or "").strip()
     if not user_msg:
+        _trace_chat_csv({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "route": "/api/chat", "req_id": req_id, "from_mic": bool(req.from_mic),
+            "lang": req.language or "bn-BD", "model": model_used, "latency_ms": int((time.time()-t0)*1000),
+            "user_len": 0, "answer_len": 0, "status": "empty",
+            "user": "", "answer": ""
+        })
         return {"answer": "বার্তা খালি। কিছু লিখুন বা বলুন।", "audio_b64": None}
 
     # 1) Greeting-only → local Bangla greeting (no model call)
     if is_greeting_only(user_msg):
         text = "স্বাগতম! আপনার ফসল, আবহাওয়া বা কৃষি সমস্যা লিখুন/বলুন—আমি ৩–৫টি সংক্ষিপ্ত, কাজে লাগার মতো পরামর্শ দেব।"
         audio_b64 = synthesize_tts(text, language=req.language or "bn-BD") if req.from_mic else None
+        _trace_chat_csv({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "route": "/api/chat", "req_id": req_id, "from_mic": bool(req.from_mic),
+            "lang": req.language or "bn-BD", "model": model_used, "latency_ms": int((time.time()-t0)*1000),
+            "user_len": len(user_msg), "answer_len": len(text), "status": "greeting",
+            "user": _sanitize_text(user_msg), "answer": _sanitize_text(text)
+        })
         return {"answer": text, "audio_b64": audio_b64}
 
     # 2) Gemini call with same prompt style (Bangla-only, 3–5 concise sentences)
@@ -311,6 +397,7 @@ def chat(req: ChatRequest):
             t = strip_banned_greetings(t)
             if t:
                 text = t
+                model_used = getattr(model, "model_name", None) or model_used
                 break
         except Exception as e:
             last_err = e
@@ -321,6 +408,14 @@ def chat(req: ChatRequest):
         text = "মডেল থেকে উত্তর আনতে সমস্যা হয়েছে।"
 
     audio_b64 = synthesize_tts(text, language=req.language or "bn-BD") if req.from_mic else None
+    _trace_chat_csv({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "route": "/api/chat", "req_id": req_id, "from_mic": bool(req.from_mic),
+        "lang": req.language or "bn-BD", "model": model_used, "latency_ms": int((time.time()-t0)*1000),
+        "user_len": len(user_msg), "answer_len": len(text or ""),
+        "status": "ok" if text and text != "মডেল থেকে উত্তর আনতে সমস্যা হয়েছে।" else "error",
+        "user": _sanitize_text(user_msg), "answer": _sanitize_text(text)
+    })
     return {"answer": text, "audio_b64": audio_b64}
 
 # ---------- API: STT (Google) ----------
