@@ -12,6 +12,8 @@
   --ring: rgba(46,164,79,0.35);
   --danger: #e92e2e;
   --shadow: 0 8px 20px rgba(0,0,0,0.06);
+  --mic-size: 96px;
+  --mic-size-sm: 84px;
 }
 
 * { box-sizing: border-box; }
@@ -24,6 +26,11 @@ html, body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
+body{
+  display: grid;
+  grid-template-rows: auto 1fr; /* header + main */
+  min-height: 100dvh;
+}
 
 .topbar{
   position: sticky;
@@ -33,7 +40,7 @@ html, body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 18px;
+  padding: 10px 12px;
   background: var(--card);
   border-bottom: 1px solid #e6ebe6;
   box-shadow: var(--shadow);
@@ -41,29 +48,29 @@ html, body {
 .brand{ display: flex; align-items: center; gap: 12px; }
 .logo{ font-size: 28px; line-height: 1; }
 .titles h1{
-  font-size: 18px; margin: 0 0 2px 0; color: var(--primary-ink);
+  font-size: 16px; margin: 0 0 1px 0; color: var(--primary-ink);
 }
 .titles .subtitle{ margin: 0; font-size: 12px; color: var(--muted); }
 
 /* Layout */
 .chatwrap{
   max-width: 860px;
-  margin: 10px auto;
+  margin: 8px auto 0; /* tighter top, no bottom space */
   padding: 0 12px;
   display: grid;
-  grid-template-rows: 1fr auto;
-  gap: 10px;
-  min-height: calc(100dvh - 120px);
+  grid-template-rows: 1fr auto; /* log grows, composer sits at bottom */
+  gap: 4px; /* tighter */
+  min-height: 100%;
 }
 
 /* Log */
 .log{
   background: var(--card);
   border: 1px solid #e6ebe6;
-  border-radius: 16px;
-  padding: 12px;
-  min-height: 40vh;
-  max-height: 60vh;
+  border-radius: 14px;
+  padding: 8px;
+  min-height: 0; /* allow to shrink to content */
+  max-height: none; /* let grid control height */
   overflow: auto;
   scroll-behavior: smooth;
   overscroll-behavior: contain;
@@ -71,13 +78,13 @@ html, body {
 .msg{
   width: fit-content;
   max-width: min(92%, 680px);
-  padding: 10px 12px;
-  margin: 8px 6px;
-  border-radius: 14px;
-  box-shadow: 0 1px 0 rgba(0,0,0,0.03);
+  padding: 8px 10px;
+  margin: 6px 4px;
+  border-radius: 12px;
+  box-shadow: none;
   word-wrap: break-word;
   white-space: pre-wrap;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 .msg.bot{
   background: var(--bot);
@@ -93,20 +100,19 @@ html, body {
 .composer{
   background: var(--card);
   border: 1px solid #e6ebe6;
-  border-radius: 16px;
-  padding: 10px;
+  border-radius: 14px;
+  padding: 8px;
   box-shadow: var(--shadow);
-  position: sticky;
-  bottom: 10px;
+  /* no sticky to avoid large gap */
 }
 .composer textarea{
   width: 100%;
   resize: vertical;
-  min-height: 42px;
-  max-height: 200px;
-  padding: 10px 12px;
+  min-height: 38px;
+  max-height: 160px;
+  padding: 8px 10px;
   border: 1px solid #dfe5df;
-  border-radius: 10px;
+  border-radius: 8px;
   outline: none;
   font: inherit;
   background: #fbfdfb;
@@ -114,22 +120,24 @@ html, body {
 }
 .composer textarea:focus{
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px var(--ring);
+  box-shadow: 0 0 0 2px var(--ring);
 }
 
 .actions{
   display: flex;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 6px;
+  margin-top: 6px;
   flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
 }
 .btn{
   appearance: none;
   border: 1px solid #cfe9d6;
   background: var(--accent);
   color: var(--primary-ink);
-  padding: 10px 14px;
-  border-radius: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
   font-weight: 600;
   cursor: pointer;
   transition: transform .02s ease-in-out, box-shadow .15s ease, background .15s ease;
@@ -138,12 +146,70 @@ html, body {
 .btn:active{ transform: translateY(1px); }
 
 .btn.send{
+  /* Swap to mic's softer style */
+  background: #f2fbf5;
+  color: var(--primary-ink);
+  border-color: #cfe9d6;
+}
+.btn.send,
+.btn.stop{
+  /* Make send and stop same size */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 108px;
+  height: 40px;
+  padding: 0 14px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.btn.mic{
+  /* Large circular mic button */
+  order: 2;
+  width: var(--mic-size);
+  height: var(--mic-size);
+  padding: 0;
+  border-radius: 50%;
+  /* Swap to send's strong primary style */
   background: linear-gradient(0deg, #2ea44f, #39c463);
   color: #fff;
   border-color: #2ea44f;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 4px 14px rgba(46,164,79,0.12);
 }
-.btn.mic{
-  background: #f2fbf5;
+.btn.mic:hover{ box-shadow: 0 10px 24px rgba(46,164,79,0.18); }
+.btn.mic:active{ transform: translateY(1px) scale(0.99); }
+
+/* Place send to the left and stop to the right */
+.btn.send{ order: 1; }
+.btn.stop{ order: 3; }
+
+/* Recording visual state (JS toggles .recording) */
+.btn.mic.recording{
+  background: #e9fbef;
+  border-color: #93e0a8;
+  color: var(--primary-ink);
+  box-shadow: 0 0 0 0 rgba(46,164,79,0.45);
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes mic-pulse{
+  0%{ box-shadow: 0 0 0 0 rgba(46,164,79,0.45); }
+  70%{ box-shadow: 0 0 0 16px rgba(46,164,79,0); }
+  100%{ box-shadow: 0 0 0 0 rgba(46,164,79,0); }
+}
+
+/* Focus-visible ring for accessibility */
+.btn:focus-visible{
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ring), 0 8px 20px rgba(0,0,0,0.08);
 }
 .btn.stop{
   background: #fff4f4;
@@ -166,8 +232,12 @@ html, body {
 
 @media (max-width: 520px){
   .titles h1{ font-size: 16px; }
+  .titles .subtitle{ display: none; }
   .composer{ padding: 8px; border-radius: 14px; }
   .actions{ gap: 6px; }
-  .btn{ padding: 9px 12px; border-radius: 10px; }
-  .log{ max-height: 55vh; }
+  .btn{ padding: 7px 10px; border-radius: 9px; }
+  .log{ max-height: 50vh; }
+  .btn.mic{ width: var(--mic-size-sm); height: var(--mic-size-sm); font-size: 16px; }
+  .btn.send, .btn.stop{ min-width: 96px; height: 38px; }
+  body{ font-size: 14px; line-height: 1.4; }
 }
