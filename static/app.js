@@ -16,10 +16,6 @@ let mediaRecorder = null;
 let chunks = [];
 let audioEl = null;
 
-// Microphone capture tuning
-// Increase this value to boost recorded volume (1.0 = no boost)
-// Reasonable range: 1.0 – 3.0
-const MIC_GAIN = 2.2;
 const AUDIO_CONSTRAINTS = {
   audio: {
     echoCancellation: true,
@@ -28,7 +24,7 @@ const AUDIO_CONSTRAINTS = {
     // Avoid strict channel/sample constraints which can fail on some devices
   }
 };
-const IS_ANDROID = /Android/i.test(navigator.userAgent || "");
+// No manual gain/boost applied; rely on device defaults
 
 function addBubble(role, text){
   const div = document.createElement("div");
@@ -110,9 +106,6 @@ async function recordWAVFallback(seconds=7){
   const ctx = new AudioCtx();
   if (ctx.state === "suspended") await ctx.resume();
   const src = ctx.createMediaStreamSource(stream);
-  // Apply gain boost before capturing samples
-  const gain = ctx.createGain();
-  gain.gain.value = MIC_GAIN;
   const proc = ctx.createScriptProcessor(4096, 2, 1);
   const floats = [];
   proc.onaudioprocess = (e)=>{
@@ -122,27 +115,15 @@ async function recordWAVFallback(seconds=7){
     for (let i=0;i<L.length;i++) mono[i] = (L[i]+R[i])*0.5;
     floats.push(mono);
   };
-  src.connect(gain);
-  gain.connect(proc);
+  src.connect(proc);
   proc.connect(ctx.destination);
   addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
   await new Promise(res => setTimeout(res, seconds*1000));
-  proc.disconnect(); gain.disconnect(); src.disconnect(); stream.getTracks().forEach(t=>t.stop());
+  proc.disconnect(); src.disconnect(); stream.getTracks().forEach(t=>t.stop());
   let len = floats.reduce((a,c)=>a+c.length,0);
   const merged = new Float32Array(len); let off=0;
   for (const c of floats){ merged.set(c,off); off+=c.length; }
-  // Adaptive normalization: bring peak close to 0.9 without exceeding a max boost
-  let peak = 0;
-  for (let i=0;i<merged.length;i++) peak = Math.max(peak, Math.abs(merged[i]));
-  const TARGET = 0.9, MAX_AUTO_GAIN = 3.0;
-  if (peak > 0 && peak < TARGET){
-    const factor = Math.min(MAX_AUTO_GAIN, TARGET/peak);
-    for (let i=0;i<merged.length;i++) merged[i] *= factor;
-  }
-  // Safety clamp after adjustment
-  for (let i=0;i<merged.length;i++){
-    if (merged[i] > 1) merged[i] = 1; else if (merged[i] < -1) merged[i] = -1;
-  }
+  // No normalization/boost; raw PCM to WAV
   return encodeWAVFromFloat32(merged, ctx.sampleRate);
 }
 
@@ -175,12 +156,6 @@ async function recordAudioBlob(){
     for (const m of mimeCandidates){
       if (MediaRecorder.isTypeSupported(m)){ mime = m; break; }
     }
-  }
-
-  // Prefer WAV path on Android for better gain control and reliability
-  if (IS_ANDROID){
-    try { stream.getTracks().forEach(t=>t.stop()); } catch {}
-    return recordWAVFallback(7);
   }
 
   if (!window.MediaRecorder || !mime){
