@@ -211,8 +211,8 @@ body{
   box-shadow: 0 4px 14px rgba(46,164,79,0.12);
 }
 .btn.mic > span[aria-hidden="true"]{
-  /* Emoji size equals 50% of button diameter */
-  font-size: calc(var(--mic-size) * 0.5);
+  /* Emoji size equals 60% of diameter */
+  font-size: calc(var(--mic-size) * 0.6);
   line-height: 1;
   display: inline-block;
 }
@@ -270,7 +270,7 @@ body{
   .btn{ padding: 7px 10px; border-radius: 9px; }
   .log{ max-height: none; min-height: 0; }
   .btn.mic{ width: var(--mic-size-sm); height: var(--mic-size-sm); font-size: 16px; }
-  .btn.mic > span[aria-hidden="true"]{ font-size: calc(var(--mic-size-sm) * 0.5); }
+  .btn.mic > span[aria-hidden="true"]{ font-size: calc(var(--mic-size-sm) * 0.6); }
   .btn.send, .btn.stop{ min-width: 96px; height: 38px; }
   body{ font-size: 14px; line-height: 1.4; }
   /* Cap chat area to ~2/3 of the screen */
