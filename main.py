@@ -9,7 +9,7 @@ import uuid
 import csv
 import threading
 
-from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -453,3 +453,11 @@ def health():
         "gcp_speech_available": bool(_GCP_OK),
         "static": True
     }
+
+# ---------- Download CSV trace (no auth) ----------
+@app.get("/admin/trace.csv")
+def download_trace_csv():
+    path = TRACE_CSV_PATH or "/data/chat_traces.csv"
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="trace not found")
+    return FileResponse(path, media_type="text/csv", filename="chat_traces.csv")
