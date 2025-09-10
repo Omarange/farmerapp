@@ -130,6 +130,29 @@ body{
   justify-content: center;
   align-items: center;
 }
+.quick{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 8px;
+}
+.chip{
+  appearance: none;
+  border: 1px solid #dfe5df;
+  background: #f7faf7;
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.chip:hover{ background: #eef7f0; }
+.chip:disabled{ opacity: .55; cursor: not-allowed; }
+
+/* Quick chips rendered as a chat bubble */
+.quick-bubble{ width: fit-content; max-width: min(92%, 680px); }
+.quick-bubble .quick{ justify-content: flex-start; }
 .btn{
   appearance: none;
   border: 1px solid #cfe9d6;
