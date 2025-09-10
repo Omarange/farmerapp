@@ -24,10 +24,8 @@ const AUDIO_CONSTRAINTS = {
   audio: {
     echoCancellation: true,
     noiseSuppression: true,
-    autoGainControl: true,
-    channelCount: 1,
-    sampleRate: 48000, // browsers may ignore
-    sampleSize: 16     // browsers may ignore
+    autoGainControl: true
+    // Avoid strict channel/sample constraints which can fail on some devices
   }
 };
 
@@ -132,10 +130,17 @@ async function recordWAVFallback(seconds=7){
   let len = floats.reduce((a,c)=>a+c.length,0);
   const merged = new Float32Array(len); let off=0;
   for (const c of floats){ merged.set(c,off); off+=c.length; }
-  // Safety clamp after boost (should already be in range, but ensure)
+  // Adaptive normalization: bring peak close to 0.9 without exceeding a max boost
+  let peak = 0;
+  for (let i=0;i<merged.length;i++) peak = Math.max(peak, Math.abs(merged[i]));
+  const TARGET = 0.9, MAX_AUTO_GAIN = 3.0;
+  if (peak > 0 && peak < TARGET){
+    const factor = Math.min(MAX_AUTO_GAIN, TARGET/peak);
+    for (let i=0;i<merged.length;i++) merged[i] *= factor;
+  }
+  // Safety clamp after adjustment
   for (let i=0;i<merged.length;i++){
-    if (merged[i] > 1) merged[i] = 1;
-    else if (merged[i] < -1) merged[i] = -1;
+    if (merged[i] > 1) merged[i] = 1; else if (merged[i] < -1) merged[i] = -1;
   }
   return encodeWAVFromFloat32(merged, ctx.sampleRate);
 }
@@ -176,35 +181,64 @@ async function recordAudioBlob(){
     return recordWAVFallback(7);
   }
 
-  // Boost path for MediaRecorder using WebAudio graph → MediaStreamDestination
-  const AudioCtx = window.AudioContext || window.webkitAudioContext;
-  const ctx = new AudioCtx();
-  if (ctx.state === "suspended") await ctx.resume();
-  const src = ctx.createMediaStreamSource(stream);
-  const gain = ctx.createGain();
-  gain.gain.value = MIC_GAIN;
-  const dest = ctx.createMediaStreamDestination();
-  src.connect(gain);
-  gain.connect(dest);
+  // Try boosted path first; if it fails/empty, fall back to direct stream, then WAV.
+  async function recordWithStream(recStream, boosted){
+    return await new Promise((resolve, reject)=>{
+      mediaStream = stream;
+      let ctx, src, gain;
+      if (boosted){
+        // keep references only to close after stop
+        ctx = recStream.__ctx;
+        src = recStream.__src;
+        gain = recStream.__gain;
+      }
+      mediaRecorder = new MediaRecorder(recStream, { mimeType: mime });
+      chunks = [];
+      mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+      addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
+      mediaRecorder.start();
+      setTimeout(()=>{ try{ mediaRecorder.stop(); }catch{} }, 7000);
+      mediaRecorder.onstop = async ()=>{
+        try{ mediaStream.getTracks().forEach(t=>t.stop()); }catch{}
+        if (boosted){ try{ src.disconnect(); gain.disconnect(); }catch{} try{ ctx && ctx.close(); }catch{} }
+        const blob = new Blob(chunks, {type: mime});
+        if (!blob || blob.size === 0){
+          return reject(new Error("empty-blob"));
+        }
+        resolve(blob);
+      };
+      mediaRecorder.onerror = e => reject(e.error || new Error("recorder-error"));
+    });
+  }
 
-  return await new Promise((resolve, reject)=>{
-    mediaStream = stream;
-    mediaRecorder = new MediaRecorder(dest.stream, { mimeType: mime });
-    chunks = [];
-    mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
-    addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
-    mediaRecorder.start();
-    setTimeout(()=>{ try{ mediaRecorder.stop(); }catch{} }, 7000);
-    mediaRecorder.onstop = ()=>{
-      mediaStream.getTracks().forEach(t=>t.stop());
-      try{ src.disconnect(); gain.disconnect(); }catch{}
-      try{ ctx.close(); }catch{}
-      const blob = new Blob(chunks, {type: mime});
-      if (!blob || blob.size === 0) return reject(new Error("empty-blob"));
-      resolve(blob);
-    };
-    mediaRecorder.onerror = e => reject(e.error || new Error("recorder-error"));
-  });
+  // Build boosted graph; if it throws, skip boosting.
+  try{
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioCtx();
+    if (ctx.state === "suspended") await ctx.resume();
+    const src = ctx.createMediaStreamSource(stream);
+    const gain = ctx.createGain();
+    gain.gain.value = MIC_GAIN;
+    const dest = ctx.createMediaStreamDestination();
+    src.connect(gain);
+    gain.connect(dest);
+    // attach refs so we can close later inside recorder stop
+    dest.__ctx = ctx; dest.__src = src; dest.__gain = gain;
+    try{
+      return await recordWithStream(dest.stream, /*boosted*/true);
+    }catch(err){
+      // fall through to direct stream
+    }
+  }catch{
+    // ignore and fall back
+  }
+
+  try{
+    return await recordWithStream(stream, /*boosted*/false);
+  }catch{
+    try { stream.getTracks().forEach(t=>t.stop()); } catch {}
+    return recordWAVFallback(7);
+  }
 }
 
 async function startServerSTT(rid){
@@ -265,4 +299,3 @@ btnStop.addEventListener("click", ()=>{
 
 // Initial greeting (unchanged)
 addBubble("bot", greeting());
-
