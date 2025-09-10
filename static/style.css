@@ -133,26 +133,29 @@ body{
 .quick{
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  justify-content: center;
-  margin-top: 8px;
+  gap: 6px; /* tighter spacing */
+  justify-content: flex-start; /* left align rows to remove left blanks */
+  margin-top: 4px; /* less top margin */
 }
 .chip{
   appearance: none;
-  border: 1px solid #dfe5df;
-  background: #f7faf7;
-  color: var(--text);
-  padding: 8px 12px;
+  border: 1px solid #cfe9d6; /* slightly stronger */
+  background: #eef7f0; /* a bit crisper */
+  color: var(--primary-ink); /* darker like question text */
+  padding: 6px 10px; /* smaller paddings */
   border-radius: 999px;
-  font-weight: 600;
+  font-weight: 400; /* normal, not bold */
+  font-size: 14px; /* slightly smaller text */
+  line-height: 1.2;
+  display: inline-flex; align-items: center; justify-content: center;
   cursor: pointer;
 }
 .chip:hover{ background: #eef7f0; }
 .chip:disabled{ opacity: .55; cursor: not-allowed; }
 
 /* Quick chips rendered as a chat bubble */
-.quick-bubble{ width: fit-content; max-width: min(92%, 680px); }
-.quick-bubble .quick{ justify-content: flex-start; }
+.quick-bubble{ width: fit-content; max-width: min(92%, 680px); padding: 6px 8px; margin: 4px 4px; }
+.quick-bubble .quick{ justify-content: flex-start; gap: 6px; }
 .btn{
   appearance: none;
   border: 1px solid #cfe9d6;
@@ -264,6 +267,10 @@ body{
   body{ font-size: 14px; line-height: 1.4; }
   /* Cap chat area to ~2/3 of the screen */
   .chatwrap{ height: 66.67dvh; max-height: 66.67dvh; grid-template-rows: 1fr auto; }
+  /* Tighter chips on small screens */
+  .quick-bubble{ padding: 4px 6px; margin: 4px; }
+  .quick{ gap: 6px; }
+  .chip{ padding: 5px 10px; font-size: 13px; }
 }
 
 /* Slightly larger phones */
