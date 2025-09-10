@@ -1,7 +1,4 @@
 import os
-import json
-import time
-import uuid
 import io
 import base64
 import re
@@ -15,7 +12,6 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from gtts import gTTS
 import google.generativeai as genai
-import logging
 
 # ---------- Google Cloud Speech-to-Text ----------
 try:
@@ -32,22 +28,49 @@ load_dotenv()
 
 # Accept either "models/gemini-1.5-*" or "gemini-1.5-*"
 _RAW_MODEL = os.getenv("MODEL_NAME", "gemini-1.5-pro").strip()
-MODEL_NAME = _RAW_MODEL.replace("models/", "")  # normalize to SDK's expected form
+MODEL_NAME = _RAW_MODEL.replace("models/", "")  # normalize for SDK
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-LOG_CHATS = os.getenv("LOG_CHATS", "0").strip().lower() in {"1","true","yes","on"}
 
-# Optional regional STT endpoint (e.g., "asia-south1-speech.googleapis.com")
+# Optional: pin STT region (e.g., "asia-south1-speech.googleapis.com")
 GOOGLE_SPEECH_ENDPOINT = os.getenv("GOOGLE_SPEECH_ENDPOINT", "").strip()
 
 def _ensure_google_creds():
-    """Allow creds via GOOGLE_APPLICATION_CREDENTIALS_JSON (Render-friendly)."""
+    """
+    Allow creds via:
+      - GOOGLE_APPLICATION_CREDENTIALS (file path)  [no-op]
+      - GOOGLE_APPLICATION_CREDENTIALS_JSON (raw JSON OR base64 JSON)
+      - GOOGLE_APPLICATION_CREDENTIALS_B64 (base64 JSON)
+    The function writes a temp file and points GOOGLE_APPLICATION_CREDENTIALS to it.
+    """
     if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         return
+
     raw_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    b64_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
+
+    content = None
     if raw_json:
+        s = raw_json.strip()
+        if s.startswith("{"):            # looks like raw JSON
+            content = s
+        else:
+            # treat as base64 if it doesn't start with "{"
+            try:
+                content = base64.b64decode(s).decode("utf-8")
+            except Exception:
+                # last resort: use as-is
+                content = s
+    elif b64_json:
+        try:
+            content = base64.b64decode(b64_json.strip()).decode("utf-8")
+        except Exception as e:
+            print("Bad GOOGLE_APPLICATION_CREDENTIALS_B64:", e)
+            content = None
+
+    if content:
         path = "/tmp/gcp_creds.json"
         with open(path, "w", encoding="utf-8") as f:
-            f.write(raw_json.strip())
+            f.write(content)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
 
 if _GCP_OK:
@@ -58,26 +81,6 @@ if GEMINI_API_KEY:
 
 app = FastAPI(title="FarmerApp")
 
-# ---------- Logging (stdout; Render captures) ----------
-logger = logging.getLogger("farmerapp")
-if not logger.handlers:
-    h = logging.StreamHandler()
-    # keep format minimal so each line is a JSON blob only
-    h.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(h)
-logger.setLevel(logging.INFO)
-
-def _log_chat(event: str, payload: dict):
-    if not LOG_CHATS:
-        return
-    data = {"ts": time.time(), "event": event}
-    try:
-        data.update(payload or {})
-        logger.info(json.dumps(data, ensure_ascii=False))
-    except Exception as e:
-        # fallback
-        logger.info(str({"event": event, "err": str(e)}))
-
 # CORS (open for dev; tighten for prod)
 app.add_middleware(
     CORSMiddleware,
@@ -87,7 +90,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve the existing static UI
+# Serve static UI
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -117,7 +120,7 @@ def synthesize_tts(text: str, language: str = "bn-BD") -> Optional[str]:
         print("TTS error:", e)
         return None
 
-# ---------- Helpers: Greeting / Cleanup (kept like your previous zip) ----------
+# ---------- Helpers: Greeting / Cleanup (same prompts/logic as before) ----------
 _GREETING_WORDS = [
     "hello", "hi", "hey", "assalamu alaikum", "assalamualaikum", "salam",
     "হ্যালো", "হাই", "হেই", "আসসালামু আলাইকুম", "সালাম", "স্বাগতম", "নমস্কার", "নমস্তে"
@@ -138,7 +141,6 @@ def strip_banned_greetings(s: str) -> str:
     if not s: return s
     s = s.strip()
     for opener in _BANNED_OPENERS:
-        # remove at line start
         if s.startswith(opener):
             s = s[len(opener):].lstrip(" ,।!-\n")
     return s
@@ -243,9 +245,9 @@ def google_stt_bytes(audio_bytes: bytes, content_type: str, language_code: str =
 
     return "", debug
 
-# ---------- API: Chat (prompts SAME as your previous zip’s intent) ----------
+# ---------- API: Chat (same prompt/behavior as your previous one) ----------
 @app.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest, request: Request):
+def chat(req: ChatRequest):
     if not GEMINI_API_KEY:
         return JSONResponse({"answer": "⚠️ GEMINI_API_KEY সেট করা নেই।", "audio_b64": None})
 
@@ -253,39 +255,13 @@ def chat(req: ChatRequest, request: Request):
     if not user_msg:
         return JSONResponse({"answer": "বার্তা খালি। কিছু লিখুন বা বলুন।", "audio_b64": None})
 
-    # 1) Greeting-only → local Bangla greeting (no model call), as before
-    # --- logging: incoming request summary ---
-    rid = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-    client_ip = request.client.host if request.client else None
-    ua = request.headers.get("user-agent", "")
-    msg_preview = user_msg[:200]
-    greeting_only = is_greeting_only(user_msg)
-    _log_chat("chat.request", {
-        "rid": rid,
-        "ip": client_ip,
-        "ua": ua,
-        "from_mic": bool(req.from_mic),
-        "lang": req.language or "bn-BD",
-        "msg_len": len(user_msg),
-        "msg_preview": msg_preview,
-        "greeting_only": greeting_only,
-    })
-
-    if greeting_only:
-        text = "স্বাগতম! আপনার ফসল, আবহাওয়া বা কৃষি সমস্যা লিখুন/বলুন—আমি সংক্ষিপ্ত, কাজে লাগার মতো পরামর্শ দেব।"
+    # 1) Greeting-only → local Bangla greeting (no model call)
+    if is_greeting_only(user_msg):
+        text = "স্বাগতম! আপনার ফসল, আবহাওয়া বা কৃষি সমস্যা লিখুন/বলুন—আমি ৩–৫টি সংক্ষিপ্ত, কাজে লাগার মতো পরামর্শ দেব।"
         audio_b64 = synthesize_tts(text, language=req.language or "bn-BD") if req.from_mic else None
-        _log_chat("chat.response", {
-            "rid": rid,
-            "model": None,
-            "answer_len": len(text),
-            "answer_preview": text[:200],
-            "audio": bool(audio_b64),
-            "status": "ok",
-            "short_circuit": True,
-        })
         return {"answer": text, "audio_b64": audio_b64}
 
-    # 2) Gemini call with SAME prompt style (Bangla-only, 3–5 concise sentences, no filler)
+    # 2) Gemini call with same prompt style (Bangla-only, 3–5 concise sentences)
     sys_prompt = (
         "তুমি একজন কৃষি সহায়ক। সবসময় বাংলায় উত্তর দেবে। "
         "৩–৫টি সংক্ষিপ্ত বাক্যে সরাসরি, কাজের মতো পরামর্শ দেবে। "
@@ -295,7 +271,6 @@ def chat(req: ChatRequest, request: Request):
 
     text = None
     last_err = None
-    used_model = None
     for model_name in [MODEL_NAME, "gemini-1.5-flash", "gemini-1.5-pro"]:
         try:
             model = genai.GenerativeModel(model_name)
@@ -304,7 +279,6 @@ def chat(req: ChatRequest, request: Request):
             t = strip_banned_greetings(t)
             if t:
                 text = t
-                used_model = model_name
                 break
         except Exception as e:
             last_err = e
@@ -315,17 +289,9 @@ def chat(req: ChatRequest, request: Request):
         text = "মডেল থেকে উত্তর আনতে সমস্যা হয়েছে।"
 
     audio_b64 = synthesize_tts(text, language=req.language or "bn-BD") if req.from_mic else None
-    _log_chat("chat.response", {
-        "rid": rid,
-        "model": used_model,
-        "answer_len": len(text),
-        "answer_preview": text[:200],
-        "audio": bool(audio_b64),
-        "status": "ok" if text else "error",
-    })
     return {"answer": text, "audio_b64": audio_b64}
 
-# ---------- API: STT (Google only) ----------
+# ---------- API: STT (Google) ----------
 @app.post("/api/stt")
 async def stt(request: Request, audio: UploadFile = File(...), lang: Optional[str] = Form("bn-BD")):
     """
@@ -333,61 +299,21 @@ async def stt(request: Request, audio: UploadFile = File(...), lang: Optional[st
     Add ?debug=1 to get detection info.
     """
     debug_mode = request.query_params.get("debug") == "1"
-    rid = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-    client_ip = request.client.host if request.client else None
-    ua = request.headers.get("user-agent", "")
     try:
         data = await audio.read()
         if not data:
             resp = {"error": "খালি অডিও আপলোড হয়েছে। আবার চেষ্টা করুন।"}
             if debug_mode: resp["debug"] = {"len": 0, "ctype": audio.content_type}
-            _log_chat("stt.request", {
-                "rid": rid,
-                "ip": client_ip,
-                "ua": ua,
-                "lang": lang or "bn-BD",
-                "upload_len": 0,
-                "content_type": (audio.content_type or "").lower(),
-            })
-            _log_chat("stt.response", {
-                "rid": rid,
-                "status": "empty",
-                "text_len": 0,
-            })
             return JSONResponse(resp, status_code=400)
 
         content_type = (audio.content_type or "").lower()
-        if content_type == "video/webm":  # normalize WebView quirk
+        if content_type == "video/webm":  # some webviews label mic as video/webm
             content_type = "audio/webm"
 
-        _log_chat("stt.request", {
-            "rid": rid,
-            "ip": client_ip,
-            "ua": ua,
-            "lang": lang or "bn-BD",
-            "upload_len": len(data),
-            "content_type": content_type,
-        })
-
         text, dbg = google_stt_bytes(data, content_type, language_code=lang or "bn-BD")
-
-        _log_chat("stt.response", {
-            "rid": rid,
-            "status": "ok",
-            "text_len": len(text or ""),
-            "text_preview": (text or "")[:200],
-            "sniff": dbg.get("sniff"),
-            "tried": dbg.get("tried"),
-            "errors_count": len(dbg.get("errors", [])),
-        })
         return {"text": text, **({"debug": dbg} if debug_mode else {})}
     except Exception as e:
         print("STT fatal error:", type(e).__name__, e)
-        _log_chat("stt.response", {
-            "rid": rid,
-            "status": "error",
-            "error": type(e).__name__,
-        })
         if debug_mode:
             return JSONResponse({"error": str(e)}, status_code=500)
         return JSONResponse({"error": "Google Speech-to-Text এ সমস্যা হয়েছে।"}, status_code=500)
@@ -400,4 +326,3 @@ def health():
         "gcp_speech_available": bool(_GCP_OK),
         "static": True
     }
-

@@ -16,16 +16,6 @@ let mediaRecorder = null;
 let chunks = [];
 let audioEl = null;
 
-const AUDIO_CONSTRAINTS = {
-  audio: {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true
-    // Avoid strict channel/sample constraints which can fail on some devices
-  }
-};
-// No manual gain/boost applied; rely on device defaults
-
 function addBubble(role, text){
   const div = document.createElement("div");
   div.className = "msg " + (role === "user" ? "user" : "bot");
@@ -34,8 +24,7 @@ function addBubble(role, text){
   log.scrollTop = log.scrollHeight;
 }
 function setBtnsDisabled(disabled){
-  // Keep Stop enabled so user can abort long operations/recordings.
-  [btnSend, btnMic].forEach(b => b && (b.disabled = disabled));
+  [btnSend, btnMic, btnStop].forEach(b => b && (b.disabled = disabled));
   if (input) input.disabled = disabled;
 }
 function stopAudio(){
@@ -49,13 +38,7 @@ function playBase64Mp3(b64){
 }
 function greeting(){ return "👋 স্বাগতম খুলনাবাসী! বার্তা লিখুন বা 🎙 ‘বলুন’ বাটন ব্যবহার করুন।"; }
 
-function genRid(){
-  if (window.crypto && window.crypto.randomUUID) return crypto.randomUUID();
-  // Fallback simple RID
-  return 'rid-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8);
-}
-
-async function sendMessage(text, fromMic=false, rid){
+async function sendMessage(text, fromMic=false){
   if (!text || busy) return;
   busy = true; setBtnsDisabled(true);
   addBubble("user", text);
@@ -65,7 +48,7 @@ async function sendMessage(text, fromMic=false, rid){
   try{
     const r = await fetch(API_CHAT, {
       method: "POST",
-      headers: {"Content-Type":"application/json", "X-Request-ID": rid || genRid()},
+      headers: {"Content-Type":"application/json"},
       body: JSON.stringify({ message: text, from_mic: fromMic, language: "bn-BD" }),
       signal: currentController.signal
     });
@@ -101,7 +84,7 @@ function encodeWAVFromFloat32(float32, sampleRate){
   return new Blob([view], {type:'audio/wav'});
 }
 async function recordWAVFallback(seconds=7){
-  const stream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
+  const stream = await navigator.mediaDevices.getUserMedia({audio:true});
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   const ctx = new AudioCtx();
   if (ctx.state === "suspended") await ctx.resume();
@@ -115,15 +98,13 @@ async function recordWAVFallback(seconds=7){
     for (let i=0;i<L.length;i++) mono[i] = (L[i]+R[i])*0.5;
     floats.push(mono);
   };
-  src.connect(proc);
-  proc.connect(ctx.destination);
+  src.connect(proc); proc.connect(ctx.destination);
   addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
   await new Promise(res => setTimeout(res, seconds*1000));
   proc.disconnect(); src.disconnect(); stream.getTracks().forEach(t=>t.stop());
   let len = floats.reduce((a,c)=>a+c.length,0);
   const merged = new Float32Array(len); let off=0;
   for (const c of floats){ merged.set(c,off); off+=c.length; }
-  // No normalization/boost; raw PCM to WAV
   return encodeWAVFromFloat32(merged, ctx.sampleRate);
 }
 
@@ -137,7 +118,7 @@ async function recordAudioBlob(){
 
   let stream;
   try{
-    stream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
+    stream = await navigator.mediaDevices.getUserMedia({audio:true});
   }catch{
     addBubble("bot","মাইক্রোফোন অনুমতি দেওয়া হয়নি।");
     throw new Error("mic-denied");
@@ -163,38 +144,25 @@ async function recordAudioBlob(){
     return recordWAVFallback(7);
   }
 
-  // Direct MediaRecorder (simpler, more compatible). If it fails, WAV fallback.
   return await new Promise((resolve, reject)=>{
     mediaStream = stream;
-    try{
-      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime });
-    }catch(e){
-      try { stream.getTracks().forEach(t=>t.stop()); } catch {}
-      recordWAVFallback(7).then(resolve).catch(reject);
-      return;
-    }
+    mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime });
     chunks = [];
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
     addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
     mediaRecorder.start();
     setTimeout(()=>{ try{ mediaRecorder.stop(); }catch{} }, 7000);
     mediaRecorder.onstop = ()=>{
-      try{ mediaStream.getTracks().forEach(t=>t.stop()); }catch{}
+      mediaStream.getTracks().forEach(t=>t.stop());
       const blob = new Blob(chunks, {type: mime});
-      if (!blob || blob.size === 0){
-        recordWAVFallback(7).then(resolve).catch(reject);
-        return;
-      }
+      if (!blob || blob.size === 0) return reject(new Error("empty-blob"));
       resolve(blob);
     };
-    mediaRecorder.onerror = ()=>{
-      try { stream.getTracks().forEach(t=>t.stop()); } catch {}
-      recordWAVFallback(7).then(resolve).catch(reject);
-    };
+    mediaRecorder.onerror = e => reject(e.error || new Error("recorder-error"));
   });
 }
 
-async function startServerSTT(rid){
+async function startServerSTT(){
   const blob = await recordAudioBlob();
   const fd = new FormData();
   const type = blob.type || "application/octet-stream";
@@ -205,8 +173,8 @@ async function startServerSTT(rid){
   fd.append("audio", blob, fileName);
   fd.append("lang", "bn-BD");
 
-  // Include debug=1 so server returns sniff/tried info
-  const r = await fetch(API_STT + '?debug=1', { method: "POST", body: fd, headers: {"X-Request-ID": rid || genRid()} });
+  // Add '?debug=1' to inspect server detection if needed
+  const r = await fetch(API_STT /* + '?debug=1' */, { method: "POST", body: fd });
   const data = await r.json();
   if (data && data.text !== undefined) return data.text || "";
   if (data && data.error) throw new Error(data.error);
@@ -216,23 +184,22 @@ async function startServerSTT(rid){
 /* ---------- UI ---------- */
 btnSend.addEventListener("click", () => {
   if (!input.value.trim()) return;
-  sendMessage(input.value.trim(), false, genRid());
+  sendMessage(input.value.trim(), false);
 });
 input.addEventListener("keydown", (e)=>{
   if (e.key === "Enter" && !e.shiftKey){
     e.preventDefault();
     if (!input.value.trim()) return;
-    sendMessage(input.value.trim(), false, genRid());
+    sendMessage(input.value.trim(), false);
   }
 });
 btnMic.addEventListener("click", async ()=>{
   if (busy) return;
   try{
-    const rid = genRid();
-    const transcript = await startServerSTT(rid);
+    const transcript = await startServerSTT();
     if (transcript){
       input.value = transcript;
-      sendMessage(transcript, true, rid);
+      sendMessage(transcript, true);
     } else {
       addBubble("bot","আপনার কথা বুঝতে পারিনি। আবার বলুন।");
     }
