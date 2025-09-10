@@ -167,6 +167,10 @@ body{
   font-weight: 600;
   cursor: pointer;
   transition: transform .02s ease-in-out, box-shadow .15s ease, background .15s ease;
+  /* Avoid text selection/copy callout on tap */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 .btn:hover{ box-shadow: 0 4px 12px rgba(46,164,79,0.15); }
 .btn:active{ transform: translateY(1px); }
@@ -209,6 +213,8 @@ body{
   overflow: hidden;
   text-overflow: ellipsis;
   box-shadow: 0 4px 14px rgba(46,164,79,0.12);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 /* No visible emoji inside mic; sr-only label remains */
 .btn.mic:hover{ box-shadow: 0 10px 24px rgba(46,164,79,0.18); }
