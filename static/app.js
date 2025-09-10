@@ -13,7 +13,6 @@ let busy = false;
 let currentController = null;
 let mediaStream = null;
 let mediaRecorder = null;
-let chunks = [];
 let audioEl = null;
 
 function addBubble(role, text){
@@ -52,6 +51,7 @@ async function sendMessage(text, fromMic=false){
       body: JSON.stringify({ message: text, from_mic: fromMic, language: "bn-BD" }),
       signal: currentController.signal
     });
+    if (!r.ok) throw new Error("HTTP " + r.status);
     const data = await r.json();
     addBubble("bot", (data && data.answer) ? data.answer : "উত্তর পাওয়া যায়নি।");
     if (data && data.audio_b64) playBase64Mp3(data.audio_b64);
@@ -99,7 +99,7 @@ async function recordWAVFallback(seconds=7){
     floats.push(mono);
   };
   src.connect(proc); proc.connect(ctx.destination);
-  addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
+  showRecordingStart();
   await new Promise(res => setTimeout(res, seconds*1000));
   proc.disconnect(); src.disconnect(); stream.getTracks().forEach(t=>t.stop());
   let len = floats.reduce((a,c)=>a+c.length,0);
@@ -109,6 +109,10 @@ async function recordWAVFallback(seconds=7){
 }
 
 /* ---------- Try MediaRecorder (webm/ogg). If unsupported → WAV fallback. ---------- */
+function showRecordingStart(){
+  addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
+}
+
 async function recordAudioBlob(){
   // HTTPS is required by most browsers (Chrome allows http://localhost)
   if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1"){
@@ -147,9 +151,9 @@ async function recordAudioBlob(){
   return await new Promise((resolve, reject)=>{
     mediaStream = stream;
     mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime });
-    chunks = [];
+    const chunks = [];
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
-    addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
+    showRecordingStart();
     mediaRecorder.start();
     setTimeout(()=>{ try{ mediaRecorder.stop(); }catch{} }, 7000);
     mediaRecorder.onstop = ()=>{
@@ -175,6 +179,7 @@ async function startServerSTT(){
 
   // Add '?debug=1' to inspect server detection if needed
   const r = await fetch(API_STT /* + '?debug=1' */, { method: "POST", body: fd });
+  if (!r.ok) throw new Error("HTTP " + r.status);
   const data = await r.json();
   if (data && data.text !== undefined) return data.text || "";
   if (data && data.error) throw new Error(data.error);

@@ -71,6 +71,14 @@ def _ensure_google_creds():
         path = "/tmp/gcp_creds.json"
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
+            try:
+                os.fchmod(f.fileno(), 0o600)
+            except Exception:
+                pass
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
 
 if _GCP_OK:
@@ -78,6 +86,21 @@ if _GCP_OK:
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
+
+# Prepare reusable Gemini model instances (avoid per-request construction)
+MODEL_CANDIDATES = []
+try:
+    _cands = [MODEL_NAME, "gemini-1.5-flash", "gemini-1.5-pro"]
+    seen = set()
+    for n in _cands:
+        n2 = (n or "").strip()
+        if n2 and n2 not in seen:
+            MODEL_CANDIDATES.append(n2)
+            seen.add(n2)
+    GENERATIVE_MODELS = [genai.GenerativeModel(n) for n in MODEL_CANDIDATES] if GEMINI_API_KEY else []
+except Exception:
+    # Fall back to lazy creation inside the request if something goes wrong here
+    GENERATIVE_MODELS = []
 
 app = FastAPI(title="FarmerApp")
 
@@ -186,39 +209,48 @@ def google_stt_bytes(audio_bytes: bytes, content_type: str, language_code: str =
         return "", debug
 
     ct = (content_type or "").lower()
-    tries = []
-    if "webm" in ct or "video/webm" in ct:
-        tries.append(("WEBM_OPUS", speech.RecognitionConfig.AudioEncoding.WEBM_OPUS))
-    if "ogg" in ct or "opus" in ct:
-        tries.append(("OGG_OPUS",  speech.RecognitionConfig.AudioEncoding.OGG_OPUS))
-    if "mpeg" in ct or "mp3" in ct:
-        tries.append(("MP3",       speech.RecognitionConfig.AudioEncoding.MP3))
-    if "wav" in ct or "x-wav" in ct or "wave" in ct:
-        tries.append(("LINEAR16",  speech.RecognitionConfig.AudioEncoding.LINEAR16))
+
+    def enc_for(kind: str):
+        return {
+            "WEBM_OPUS": speech.RecognitionConfig.AudioEncoding.WEBM_OPUS,
+            "OGG_OPUS":  speech.RecognitionConfig.AudioEncoding.OGG_OPUS,
+            "MP3":       speech.RecognitionConfig.AudioEncoding.MP3,
+            "LINEAR16":  speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        }[kind]
+
+    # Pick at most two attempts based on content-type and sniff
+    primary = None
+    if "webm" in ct:
+        primary = ("WEBM_OPUS", enc_for("WEBM_OPUS"))
+    elif "ogg" in ct or "opus" in ct:
+        primary = ("OGG_OPUS", enc_for("OGG_OPUS"))
+    elif "mpeg" in ct or "mp3" in ct:
+        primary = ("MP3", enc_for("MP3"))
+    elif "wav" in ct or "x-wav" in ct or "wave" in ct:
+        primary = ("LINEAR16", enc_for("LINEAR16"))
 
     sniff = debug["sniff"]
     sniff_map = {
-        "webm": ("WEBM_OPUS", speech.RecognitionConfig.AudioEncoding.WEBM_OPUS),
-        "ogg":  ("OGG_OPUS",  speech.RecognitionConfig.AudioEncoding.OGG_OPUS),
-        "mp3":  ("MP3",       speech.RecognitionConfig.AudioEncoding.MP3),
-        "wav":  ("LINEAR16",  speech.RecognitionConfig.AudioEncoding.LINEAR16),
+        "webm": ("WEBM_OPUS", enc_for("WEBM_OPUS")),
+        "ogg":  ("OGG_OPUS",  enc_for("OGG_OPUS")),
+        "mp3":  ("MP3",       enc_for("MP3")),
+        "wav":  ("LINEAR16",  enc_for("LINEAR16")),
     }
-    if sniff in sniff_map and sniff_map[sniff] not in tries:
-        tries.append(sniff_map[sniff])
+    secondary = sniff_map.get(sniff)
 
-    for item in [
-        ("WEBM_OPUS", speech.RecognitionConfig.AudioEncoding.WEBM_OPUS),
-        ("OGG_OPUS",  speech.RecognitionConfig.AudioEncoding.OGG_OPUS),
-        ("MP3",       speech.RecognitionConfig.AudioEncoding.MP3),
-        ("LINEAR16",  speech.RecognitionConfig.AudioEncoding.LINEAR16),
-    ]:
-        if item not in tries:
-            tries.append(item)
+    tries = []
+    if primary:
+        tries.append(primary)
+    if secondary and secondary != primary:
+        tries.append(secondary)
+    if not tries:
+        # Reasonable default + one fallback
+        tries = [("WEBM_OPUS", enc_for("WEBM_OPUS")), ("OGG_OPUS", enc_for("OGG_OPUS"))]
 
     client = _speech_client()
     audio = speech.RecognitionAudio(content=audio_bytes)
 
-    for label, enc in tries:
+    for label, enc in tries[:2]:  # at most two attempts
         debug["tried"].append(label)
         try:
             cfg = {
@@ -249,11 +281,11 @@ def google_stt_bytes(audio_bytes: bytes, content_type: str, language_code: str =
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     if not GEMINI_API_KEY:
-        return JSONResponse({"answer": "⚠️ GEMINI_API_KEY সেট করা নেই।", "audio_b64": None})
+        return {"answer": "⚠️ GEMINI_API_KEY সেট করা নেই।", "audio_b64": None}
 
     user_msg = (req.message or "").strip()
     if not user_msg:
-        return JSONResponse({"answer": "বার্তা খালি। কিছু লিখুন বা বলুন।", "audio_b64": None})
+        return {"answer": "বার্তা খালি। কিছু লিখুন বা বলুন।", "audio_b64": None}
 
     # 1) Greeting-only → local Bangla greeting (no model call)
     if is_greeting_only(user_msg):
@@ -271,9 +303,9 @@ def chat(req: ChatRequest):
 
     text = None
     last_err = None
-    for model_name in [MODEL_NAME, "gemini-1.5-flash", "gemini-1.5-pro"]:
+    models_to_try = GENERATIVE_MODELS or [genai.GenerativeModel(MODEL_NAME)]
+    for model in models_to_try:
         try:
-            model = genai.GenerativeModel(model_name)
             resp = model.generate_content([sys_prompt, user_msg])
             t = (getattr(resp, "text", None) or "").strip()
             t = strip_banned_greetings(t)
