@@ -16,8 +16,6 @@ let mediaRecorder = null;
 let chunks = [];
 let audioEl = null;
 
-<<<<<<< HEAD
-=======
 // Microphone capture tuning
 // Increase this value to boost recorded volume (1.0 = no boost)
 // Reasonable range: 1.0 – 3.0
@@ -33,7 +31,6 @@ const AUDIO_CONSTRAINTS = {
   }
 };
 
->>>>>>> 62b40ba (Initial commit: app, API and static files)
 function addBubble(role, text){
   const div = document.createElement("div");
   div.className = "msg " + (role === "user" ? "user" : "bot");
@@ -42,12 +39,8 @@ function addBubble(role, text){
   log.scrollTop = log.scrollHeight;
 }
 function setBtnsDisabled(disabled){
-<<<<<<< HEAD
-  [btnSend, btnMic, btnStop].forEach(b => b && (b.disabled = disabled));
-=======
   // Keep Stop enabled so user can abort long operations/recordings.
   [btnSend, btnMic].forEach(b => b && (b.disabled = disabled));
->>>>>>> 62b40ba (Initial commit: app, API and static files)
   if (input) input.disabled = disabled;
 }
 function stopAudio(){
@@ -61,9 +54,6 @@ function playBase64Mp3(b64){
 }
 function greeting(){ return "👋 স্বাগতম খুলনাবাসী! বার্তা লিখুন বা 🎙 ‘বলুন’ বাটন ব্যবহার করুন।"; }
 
-<<<<<<< HEAD
-async function sendMessage(text, fromMic=false){
-=======
 function genRid(){
   if (window.crypto && window.crypto.randomUUID) return crypto.randomUUID();
   // Fallback simple RID
@@ -71,7 +61,6 @@ function genRid(){
 }
 
 async function sendMessage(text, fromMic=false, rid){
->>>>>>> 62b40ba (Initial commit: app, API and static files)
   if (!text || busy) return;
   busy = true; setBtnsDisabled(true);
   addBubble("user", text);
@@ -81,11 +70,7 @@ async function sendMessage(text, fromMic=false, rid){
   try{
     const r = await fetch(API_CHAT, {
       method: "POST",
-<<<<<<< HEAD
-      headers: {"Content-Type":"application/json"},
-=======
       headers: {"Content-Type":"application/json", "X-Request-ID": rid || genRid()},
->>>>>>> 62b40ba (Initial commit: app, API and static files)
       body: JSON.stringify({ message: text, from_mic: fromMic, language: "bn-BD" }),
       signal: currentController.signal
     });
@@ -121,21 +106,14 @@ function encodeWAVFromFloat32(float32, sampleRate){
   return new Blob([view], {type:'audio/wav'});
 }
 async function recordWAVFallback(seconds=7){
-<<<<<<< HEAD
-  const stream = await navigator.mediaDevices.getUserMedia({audio:true});
-=======
   const stream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
->>>>>>> 62b40ba (Initial commit: app, API and static files)
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   const ctx = new AudioCtx();
   if (ctx.state === "suspended") await ctx.resume();
   const src = ctx.createMediaStreamSource(stream);
-<<<<<<< HEAD
-=======
   // Apply gain boost before capturing samples
   const gain = ctx.createGain();
   gain.gain.value = MIC_GAIN;
->>>>>>> 62b40ba (Initial commit: app, API and static files)
   const proc = ctx.createScriptProcessor(4096, 2, 1);
   const floats = [];
   proc.onaudioprocess = (e)=>{
@@ -145,15 +123,6 @@ async function recordWAVFallback(seconds=7){
     for (let i=0;i<L.length;i++) mono[i] = (L[i]+R[i])*0.5;
     floats.push(mono);
   };
-<<<<<<< HEAD
-  src.connect(proc); proc.connect(ctx.destination);
-  addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
-  await new Promise(res => setTimeout(res, seconds*1000));
-  proc.disconnect(); src.disconnect(); stream.getTracks().forEach(t=>t.stop());
-  let len = floats.reduce((a,c)=>a+c.length,0);
-  const merged = new Float32Array(len); let off=0;
-  for (const c of floats){ merged.set(c,off); off+=c.length; }
-=======
   src.connect(gain);
   gain.connect(proc);
   proc.connect(ctx.destination);
@@ -168,7 +137,6 @@ async function recordWAVFallback(seconds=7){
     if (merged[i] > 1) merged[i] = 1;
     else if (merged[i] < -1) merged[i] = -1;
   }
->>>>>>> 62b40ba (Initial commit: app, API and static files)
   return encodeWAVFromFloat32(merged, ctx.sampleRate);
 }
 
@@ -182,11 +150,7 @@ async function recordAudioBlob(){
 
   let stream;
   try{
-<<<<<<< HEAD
-    stream = await navigator.mediaDevices.getUserMedia({audio:true});
-=======
     stream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
->>>>>>> 62b40ba (Initial commit: app, API and static files)
   }catch{
     addBubble("bot","মাইক্রোফোন অনুমতি দেওয়া হয়নি।");
     throw new Error("mic-denied");
@@ -212,11 +176,6 @@ async function recordAudioBlob(){
     return recordWAVFallback(7);
   }
 
-<<<<<<< HEAD
-  return await new Promise((resolve, reject)=>{
-    mediaStream = stream;
-    mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime });
-=======
   // Boost path for MediaRecorder using WebAudio graph → MediaStreamDestination
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   const ctx = new AudioCtx();
@@ -231,7 +190,6 @@ async function recordAudioBlob(){
   return await new Promise((resolve, reject)=>{
     mediaStream = stream;
     mediaRecorder = new MediaRecorder(dest.stream, { mimeType: mime });
->>>>>>> 62b40ba (Initial commit: app, API and static files)
     chunks = [];
     mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
     addBubble("bot","🎙 রেকর্ডিং শুরু হয়েছে… ৫–10 সেকেন্ড বলুন, আমি বুঝে নেব।");
@@ -239,11 +197,8 @@ async function recordAudioBlob(){
     setTimeout(()=>{ try{ mediaRecorder.stop(); }catch{} }, 7000);
     mediaRecorder.onstop = ()=>{
       mediaStream.getTracks().forEach(t=>t.stop());
-<<<<<<< HEAD
-=======
       try{ src.disconnect(); gain.disconnect(); }catch{}
       try{ ctx.close(); }catch{}
->>>>>>> 62b40ba (Initial commit: app, API and static files)
       const blob = new Blob(chunks, {type: mime});
       if (!blob || blob.size === 0) return reject(new Error("empty-blob"));
       resolve(blob);
@@ -252,11 +207,7 @@ async function recordAudioBlob(){
   });
 }
 
-<<<<<<< HEAD
-async function startServerSTT(){
-=======
 async function startServerSTT(rid){
->>>>>>> 62b40ba (Initial commit: app, API and static files)
   const blob = await recordAudioBlob();
   const fd = new FormData();
   const type = blob.type || "application/octet-stream";
@@ -268,11 +219,7 @@ async function startServerSTT(rid){
   fd.append("lang", "bn-BD");
 
   // Add '?debug=1' to inspect server detection if needed
-<<<<<<< HEAD
-  const r = await fetch(API_STT /* + '?debug=1' */, { method: "POST", body: fd });
-=======
   const r = await fetch(API_STT /* + '?debug=1' */, { method: "POST", body: fd, headers: {"X-Request-ID": rid || genRid()} });
->>>>>>> 62b40ba (Initial commit: app, API and static files)
   const data = await r.json();
   if (data && data.text !== undefined) return data.text || "";
   if (data && data.error) throw new Error(data.error);
@@ -282,38 +229,23 @@ async function startServerSTT(rid){
 /* ---------- UI ---------- */
 btnSend.addEventListener("click", () => {
   if (!input.value.trim()) return;
-<<<<<<< HEAD
-  sendMessage(input.value.trim(), false);
-=======
   sendMessage(input.value.trim(), false, genRid());
->>>>>>> 62b40ba (Initial commit: app, API and static files)
 });
 input.addEventListener("keydown", (e)=>{
   if (e.key === "Enter" && !e.shiftKey){
     e.preventDefault();
     if (!input.value.trim()) return;
-<<<<<<< HEAD
-    sendMessage(input.value.trim(), false);
-=======
     sendMessage(input.value.trim(), false, genRid());
->>>>>>> 62b40ba (Initial commit: app, API and static files)
   }
 });
 btnMic.addEventListener("click", async ()=>{
   if (busy) return;
   try{
-<<<<<<< HEAD
-    const transcript = await startServerSTT();
-    if (transcript){
-      input.value = transcript;
-      sendMessage(transcript, true);
-=======
     const rid = genRid();
     const transcript = await startServerSTT(rid);
     if (transcript){
       input.value = transcript;
       sendMessage(transcript, true, rid);
->>>>>>> 62b40ba (Initial commit: app, API and static files)
     } else {
       addBubble("bot","আপনার কথা বুঝতে পারিনি। আবার বলুন।");
     }
@@ -333,3 +265,4 @@ btnStop.addEventListener("click", ()=>{
 
 // Initial greeting (unchanged)
 addBubble("bot", greeting());
+
