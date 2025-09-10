@@ -355,7 +355,7 @@ async function finishPressToTalk(send=true){
 
 async function cancelRecording(){
   await finishPressToTalk(false);
-  addBubble("bot","রেকর্ডিং বাতিল হয়েছে।");
+  addBubble("bot","রেকর্ডিং শেষ হয়েছে।");
 }
 
 /* ---------- UI ---------- */
