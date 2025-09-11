@@ -274,8 +274,8 @@ body{
   
   .btn.send, .btn.stop{ min-width: 96px; height: 38px; }
   body{ font-size: 14px; line-height: 1.4; }
-  /* Cap chat area to a smaller panel to remove extra bottom space */
-  .chatwrap{ height: 56dvh; max-height: 56dvh; grid-template-rows: 1fr auto; }
+  /* Cap chat area to ~2/3 of the screen */
+  .chatwrap{ height: 66.67dvh; max-height: 66.67dvh; grid-template-rows: 1fr auto; }
   /* Tighter chips on small screens */
   .quick-bubble{ padding: 4px 6px; margin: 4px; }
   .quick{ gap: 6px; }
