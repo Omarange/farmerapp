@@ -58,8 +58,9 @@ body{
   margin: 8px auto 0; /* tighter top, no bottom space */
   padding: 0 12px;
   display: grid;
-  grid-template-rows: auto auto; /* log fits content, no extra gap */
+  grid-template-rows: 1fr auto; /* grow log, composer at bottom */
   gap: 4px; /* tighter */
+  min-height: 100%;
 }
 
 /* Log */
@@ -274,8 +275,8 @@ body{
   
   .btn.send, .btn.stop{ min-width: 96px; height: 38px; }
   body{ font-size: 14px; line-height: 1.4; }
-  /* Cap chat area to ~2/3 of the screen */
-  .chatwrap{ height: 66.67dvh; max-height: 66.67dvh; grid-template-rows: 1fr auto; }
+  /* Let chat panel auto-size; no fixed viewport height */
+  .chatwrap{ height: auto; max-height: none; grid-template-rows: auto auto; }
   /* Tighter chips on small screens */
   .quick-bubble{ padding: 4px 6px; margin: 4px; }
   .quick{ gap: 6px; }
@@ -284,6 +285,6 @@ body{
 
 /* Slightly larger phones */
 @media (max-width: 768px) and (min-width: 521px){
-  .chatwrap{ height: 66.67dvh; max-height: 66.67dvh; grid-template-rows: 1fr auto; }
+  .chatwrap{ height: auto; max-height: none; grid-template-rows: auto auto; }
   .log{ max-height: none; min-height: 0; }
 }
