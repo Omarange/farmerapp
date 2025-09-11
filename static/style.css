@@ -18,19 +18,18 @@
 
 * { box-sizing: border-box; }
 html, body {
-  height: 100%;
+  /* Avoid taking over host page scrolling/layout when embedded */
   margin: 0;
   background: var(--bg);
   color: var(--text);
   font: 15px/1.45 system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans Bengali", "Noto Sans", "Hind Siliguri", Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  overscroll-behavior: none;
+  /* Let scroll bubble to the host page when at edges */
+  overscroll-behavior: auto;
 }
 body{
-  display: grid;
-  grid-template-rows: auto 1fr; /* header + main */
-  min-height: 100svh; /* use stable viewport height to prevent jumps */
+  /* Use normal block flow to avoid hijacking host layout */
 }
 
 .topbar{
@@ -61,8 +60,8 @@ body{
   display: flex;
   flex-direction: column;
   gap: 4px; /* tighter */
-  min-height: 100%;
-  overscroll-behavior: contain; /* prevent scroll chaining */
+  /* Don't force a min-height; allow natural size in overlays */
+  overscroll-behavior: auto; /* allow parent/page scroll when at edge */
 }
 
 /* Log */
@@ -76,7 +75,7 @@ body{
   max-height: none;
   overflow: auto;      /* only inner area scrolls when needed */
   scroll-behavior: smooth;
-  overscroll-behavior: contain;
+  overscroll-behavior: auto; /* allow chaining to the page */
   scrollbar-gutter: stable;
 }
 .msg{
@@ -276,9 +275,8 @@ body{
   .btn{ padding: 7px 10px; border-radius: 9px; }
   .log{ max-height: none; min-height: 0; }
   .btn.mic{ width: var(--mic-size-sm); height: var(--mic-size-sm); font-size: 16px; }
-  
   .btn.send, .btn.stop{ min-width: 96px; height: 38px; }
-  body{ font-size: 14px; line-height: 1.4; }
+  /* Avoid changing host page body typography in embeds */
   /* Flex layout already controls sizing; nothing special needed here */
   .chatwrap{ height: auto; max-height: none; }
   /* Tighter chips on small screens */
