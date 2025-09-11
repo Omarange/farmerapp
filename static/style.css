@@ -12,8 +12,11 @@
   --ring: rgba(46,164,79,0.35);
   --danger: #e92e2e;
   --shadow: 0 8px 20px rgba(0,0,0,0.06);
-  --mic-size: 96px;
-  --mic-size-sm: 84px;
+  /* Approx header height so chat area fills viewport nicely in an iframe */
+  --topbar-h: 56px;
+  /* Make composer smaller so log (upper box) feels larger */
+  --mic-size: 78px;
+  --mic-size-sm: 68px;
 }
 
 * { box-sizing: border-box; }
@@ -59,19 +62,23 @@ body{
   padding: 0 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px; /* tighter */
-  /* Don't force a min-height; allow natural size in overlays */
+  gap: 10px; /* clearer separation between the two boxes */
+  /* Fill the iframe viewport so the composer sits near bottom */
+  min-height: calc(100vh - var(--topbar-h));
+  min-height: calc(100dvh - var(--topbar-h));
   overscroll-behavior: auto; /* allow parent/page scroll when at edge */
 }
 
 /* Log */
 .log{
+  /* Make upper box more spacious and distinct */
   background: var(--card);
   border: 1px solid #e6ebe6;
   border-radius: 14px;
-  padding: 10px;
-  flex: 1 1 auto;      /* fill remaining space */
-  min-height: 0;       /* allow to shrink */
+  padding: 12px 12px 14px;
+  flex: 1 1 auto;
+  /* Give the log (upper box) more vertical space */
+  min-height: 48vh;
   max-height: none;
   overflow: auto;      /* only inner area scrolls when needed */
   scroll-behavior: smooth;
@@ -110,9 +117,13 @@ body{
 }
 .composer textarea{
   width: 100%;
-  resize: vertical;
-  min-height: 38px;
-  max-height: 160px;
+  /* Fixed two-line input (no manual resize) */
+  resize: none;
+  line-height: 1.45;
+  height: calc(1.45em * 2 + 16px); /* 2 lines + vertical padding */
+  min-height: calc(1.45em * 2 + 16px);
+  max-height: calc(1.45em * 2 + 16px);
+  overflow-y: auto;
   padding: 8px 10px;
   border: 1px solid #dfe5df;
   border-radius: 8px;
