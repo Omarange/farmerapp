@@ -228,6 +228,24 @@ def strip_banned_greetings(s: str) -> str:
             s = s[len(opener):].lstrip(" ,।!-\n")
     return s
 
+# ---------- Scope guard: Agriculture-only ----------
+_AGRI_KEYWORDS = [
+    # Bengali terms (common crops, tasks, pests, inputs, weather)
+    "কৃষি","ফসল","শস্য","ধান","গম","ভুট্টা","টমেটো","আলু","বেগুন","শসা","মরিচ","তরমুজ","পেঁয়াজ","ডাল","সরিষা","পাট","সবজি","ফল",
+    "বীজ","চারা","রোপণ","কাটাই","ফসল কাটা","ফলন","রোগ","পোকা","কীট","কীটনাশক","জৈব","সার","সেচ","পানি","সেচব্যবস্থা",
+    "মাটি","pH","পিএইচ","মাটির","আগাছা","ছত্রাক","বালাই","আবহাওয়া","বৃষ্টি","খরা","শিলাবৃষ্টি","তাপমাত্রা","আর্দ্রতা",
+    # English helpers
+    "agri","agriculture","crop","farmer","harvest","yield","seed","seedling","planting","irrigation","fertilizer","pesticide","soil","weather"
+]
+_AGRI_RE = re.compile(r"(" + r"|".join([re.escape(w) for w in _AGRI_KEYWORDS]) + r")", re.IGNORECASE)
+
+def is_agri_related(text: str) -> bool:
+    """Shallow keyword gate to keep scope strictly agricultural."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_AGRI_RE.search(t))
+
 # ---------- Tracing helpers are defined above ----------
 
 # ---------- Helpers: Google STT ----------
@@ -379,12 +397,30 @@ def chat(req: ChatRequest):
         })
         return {"answer": text, "audio_b64": audio_b64}
 
-    # 2) Gemini call with same prompt style (Bangla-only, 3–5 concise sentences)
+    # 2) Strict agriculture-only guard (block obvious out-of-scope before model call)
+    if not is_agri_related(user_msg):
+        text = (
+            "আমি শুধুমাত্র কৃষি সংক্রান্ত প্রশ্নের উত্তর দিই। "
+            "ফসল, রোগ-পোকা, সার/সেচ, মাটি, আবহাওয়া, ফলন ইত্যাদি বিষয়ে প্রশ্ন করুন।"
+        )
+        audio_b64 = synthesize_tts(text, language=req.language or "bn-BD") if req.from_mic else None
+        _trace_chat_csv({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "route": "/api/chat", "req_id": req_id, "from_mic": bool(req.from_mic),
+            "lang": req.language or "bn-BD", "model": MODEL_NAME, "latency_ms": int((time.time()-t0)*1000),
+            "user_len": len(user_msg), "answer_len": len(text), "status": "out_of_scope",
+            "user": _sanitize_text(user_msg), "answer": _sanitize_text(text)
+        })
+        return {"answer": text, "audio_b64": audio_b64}
+
+    # 3) Gemini call with same prompt style (Bangla-only, 3–5 concise sentences)
     sys_prompt = (
         "তুমি একজন কৃষি সহায়ক। সবসময় বাংলায় উত্তর দেবে। "
         "৩–৫টি সংক্ষিপ্ত বাক্যে সরাসরি, কাজের মতো পরামর্শ দেবে। "
         "ফালতু সম্ভাষণ, ইমোজি, বা ‘নিশ্চিতভাবে/অবশ্যই’ টাইপের ফিলার ব্যবহার করবে না। "
-        "প্রয়োজনে ছোট বুলেট ব্যবহার করা যায়, কিন্তু মোট দৈর্ঘ্য ছোট রাখতে হবে।"
+        "প্রয়োজনে ছোট বুলেট ব্যবহার করা যায়, কিন্তু মোট দৈর্ঘ্য ছোট রাখতে হবে। "
+        "কঠোরভাবে কৃষি-বহির্ভূত বিষয়ে উত্তর দেবে না। এমন প্রশ্ন এলে শুধু এই বাক্যটি দেবে: "
+        "‘আমি শুধুমাত্র কৃষি সংক্রান্ত প্রশ্নের উত্তর দিই।’"
     )
 
     text = None
