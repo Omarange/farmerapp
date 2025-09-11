@@ -25,11 +25,12 @@ html, body {
   font: 15px/1.45 system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans Bengali", "Noto Sans", "Hind Siliguri", Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
 }
 body{
   display: grid;
   grid-template-rows: auto 1fr; /* header + main */
-  min-height: 100dvh;
+  min-height: 100svh; /* use stable viewport height to prevent jumps */
 }
 
 .topbar{
@@ -57,10 +58,11 @@ body{
   max-width: 860px;
   margin: 8px auto 0; /* tighter top, no bottom space */
   padding: 0 12px;
-  display: grid;
-  grid-template-rows: 1fr auto; /* grow log, composer at bottom */
+  display: flex;
+  flex-direction: column;
   gap: 4px; /* tighter */
   min-height: 100%;
+  overscroll-behavior: contain; /* prevent scroll chaining */
 }
 
 /* Log */
@@ -69,11 +71,13 @@ body{
   border: 1px solid #e6ebe6;
   border-radius: 14px;
   padding: 10px;
-  min-height: 40dvh; /* make the top box larger by default */
-  max-height: none; /* let grid control height */
-  overflow: auto;
+  flex: 1 1 auto;      /* fill remaining space */
+  min-height: 0;       /* allow to shrink */
+  max-height: none;
+  overflow: auto;      /* only inner area scrolls when needed */
   scroll-behavior: smooth;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .msg{
   width: fit-content;
@@ -103,7 +107,7 @@ body{
   border-radius: 14px;
   padding: 8px;
   box-shadow: var(--shadow);
-  /* no sticky to avoid large gap */
+  flex: 0 0 auto; /* fixed; no vertical growth */
 }
 .composer textarea{
   width: 100%;
@@ -273,13 +277,13 @@ body{
   .composer{ padding: 8px; border-radius: 14px; }
   .actions{ gap: 6px; }
   .btn{ padding: 7px 10px; border-radius: 9px; }
-  .log{ max-height: none; min-height: 60dvh; }
+  .log{ max-height: none; min-height: 0; }
   .btn.mic{ width: var(--mic-size-sm); height: var(--mic-size-sm); font-size: 16px; }
   
   .btn.send, .btn.stop{ min-width: 96px; height: 38px; }
   body{ font-size: 14px; line-height: 1.4; }
-  /* Let chat panel auto-size; no fixed viewport height */
-  .chatwrap{ height: auto; max-height: none; grid-template-rows: auto auto; }
+  /* Flex layout already controls sizing; nothing special needed here */
+  .chatwrap{ height: auto; max-height: none; }
   /* Tighter chips on small screens */
   .quick-bubble{ padding: 4px 6px; margin: 4px; }
   .quick{ gap: 6px; }
