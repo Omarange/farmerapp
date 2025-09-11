@@ -66,7 +66,7 @@ body{
   padding: 0 12px;
   display: flex;
   flex-direction: column;
-  gap: 10px; /* clearer separation between the two boxes */
+  gap: 0; /* remove gap so upper box touches the composer */
   /* Fill the iframe viewport so the composer sits near bottom */
   min-height: calc(100vh - var(--topbar-h));
   min-height: calc(100dvh - var(--topbar-h));
@@ -82,11 +82,8 @@ body{
   padding: 12px 12px 14px;
   /* Fixed, scrollable box height so content scrolls inside */
   flex: 0 0 auto;
-  /* Keep within viewport so the composer doesn't fall below */
-  height: min(
-    clamp(420px, 64dvh, 840px),
-    calc(100dvh - var(--topbar-h) - var(--composer-h) - 16px)
-  );
+  /* Target approx 780px tall, but never exceed viewport minus footer */
+  height: min(780px, calc(100dvh - var(--topbar-h) - var(--composer-h)));
   overflow: auto;      /* inner scrolling */
   scroll-behavior: smooth;
   overscroll-behavior: auto; /* allow chaining at edges */
@@ -119,12 +116,15 @@ body{
   border: 1px solid #e6ebe6;
   border-radius: 14px;
   padding: 8px;
+  /* Give a bit more white area at the bottom inside the box */
+  padding-bottom: 16px;
   box-shadow: var(--shadow);
   flex: 0 0 auto; /* fixed; no vertical growth */
   /* Anchor to bottom and rise with keyboard/safe areas on mobile */
   position: sticky;
   bottom: calc(8px + var(--safe-bottom));
-  margin-top: auto; /* pushes it to bottom when extra space exists */
+  /* Keep composer close to the log; avoid large gap */
+  margin-top: 6px;
   z-index: 5;
 }
 .composer textarea{
@@ -296,7 +296,7 @@ body{
   .composer{ padding: 8px; border-radius: 14px; }
   .actions{ gap: 6px; }
   .btn{ padding: 7px 10px; border-radius: 9px; }
-  .log{ max-height: none; min-height: 0; }
+  .log{ height: min(780px, calc(100dvh - var(--topbar-h) - var(--composer-h))); }
   .btn.mic{ width: var(--mic-size-sm); height: var(--mic-size-sm); font-size: 16px; }
   .btn.send, .btn.stop{ min-width: 96px; height: 38px; }
   /* Avoid changing host page body typography in embeds */
@@ -311,5 +311,5 @@ body{
 /* Slightly larger phones */
 @media (max-width: 768px) and (min-width: 521px){
   .chatwrap{ height: auto; max-height: none; grid-template-rows: auto auto; }
-  .log{ max-height: none; min-height: 0; }
+  .log{ height: min(780px, calc(100dvh - var(--topbar-h) - var(--composer-h))); }
 }
