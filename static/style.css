@@ -111,12 +111,9 @@ body{
 }
 .composer textarea{
   width: 100%;
-  /* Fixed two-line input */
-  resize: none;
-  height: 56px;           /* ~2 lines at 15px * 1.4 + padding */
-  min-height: 56px;
-  max-height: 56px;
-  overflow-y: auto;
+  resize: vertical;
+  min-height: 38px;
+  max-height: 160px;
   padding: 8px 10px;
   border: 1px solid #dfe5df;
   border-radius: 8px;
