@@ -228,6 +228,36 @@ def strip_banned_greetings(s: str) -> str:
             s = s[len(opener):].lstrip(" ,।!-\n")
     return s
 
+def _strip_numbered_list(text: str) -> str:
+    """Remove leading numeric numbering like 1), ২., (3) from each line,
+    keeping dash bullets intact."""
+    if not text:
+        return text
+    bn_digits = "০১২৩৪৫৬৭৮৯"
+    pat = re.compile(rf"^\s*(?:\(?[{bn_digits}0-9]{{1,2}}\)?[)\.:\-]?)\s+")
+    out_lines = []
+    for ln in str(text).splitlines():
+        out_lines.append(pat.sub("", ln))
+    return "\n".join(out_lines)
+
+def _limit_lines(text: str, max_lines: int = 5) -> str:
+    """Clamp output to at most max_lines by preferring existing line breaks,
+    else splitting on Bengali/English sentence delimiters. Keeps order.
+    """
+    if not text:
+        return text
+    # Prefer explicit newlines
+    lines = [ln.strip() for ln in str(text).split("\n") if ln.strip()]
+    if len(lines) > 1:
+        return "\n".join(lines[:max_lines])
+    # Fallback to sentence split (Bengali danda + common punctuation)
+    parts = [p.strip() for p in re.split(r"[।.!?]+\s*", str(text)) if p.strip()]
+    if not parts:
+        return text.strip()
+    kept = parts[:max_lines]
+    # Re-join as lines
+    return "\n".join(kept)
+
 # ---------- Scope guard: Agriculture-only ----------
 _AGRI_KEYWORDS = [
     # Bengali terms (common crops, tasks, pests, inputs, weather)
@@ -413,14 +443,15 @@ def chat(req: ChatRequest):
         })
         return {"answer": text, "audio_b64": audio_b64}
 
-    # 3) Gemini call with same prompt style (Bangla-only, 3–5 concise sentences)
+    # 3) Gemini call with strict 3–5 line output (Bangla)
     sys_prompt = (
-        "তুমি একজন কৃষি সহায়ক। সবসময় বাংলায় উত্তর দেবে। "
-        "৩–৫টি সংক্ষিপ্ত বাক্যে সরাসরি, কাজের মতো পরামর্শ দেবে। "
-        "ফালতু সম্ভাষণ, ইমোজি, বা ‘নিশ্চিতভাবে/অবশ্যই’ টাইপের ফিলার ব্যবহার করবে না। "
-        "প্রয়োজনে ছোট বুলেট ব্যবহার করা যায়, কিন্তু মোট দৈর্ঘ্য ছোট রাখতে হবে। "
-        "কঠোরভাবে কৃষি-বহির্ভূত বিষয়ে উত্তর দেবে না। এমন প্রশ্ন এলে শুধু এই বাক্যটি দেবে: "
-        "‘আমি শুধুমাত্র কৃষি সংক্রান্ত প্রশ্নের উত্তর দিই।’"
+        """তুমি একজন কৃষি সহায়ক। সবসময় বাংলায় উত্তর দেবে।
+শুধু ৩–৫টি ছোট লাইনে উত্তর দেবে—কখনও ৫ লাইন অতিক্রম করবে না। নম্বরযুক্ত পয়েন্ট (১/2/3/4) দেবে না; প্রয়োজনে ড্যাশ (-) দিয়ে ছোট লাইন, নইলে ৩–৫টি বাক্যের অনুচ্ছেদ।
+অগ্রাধিকার ক্রমে কভার করবে: সার/ডোজ; পানি/নিষ্কাশন; আবহাওয়া-ভিত্তিক করণীয়; কীটনাশক বা রোগ–পোকা (প্রাসঙ্গিক হলে এক লাইনে); নিরাপত্তা/PHI/REI (এক লাইনে)।
+সংখ্যা ও একক (কেজি/বিঘা, কেজি/একর, মি.লি./লিটার, লিটার/একর) স্পষ্ট করবে।
+কীটনাশক বলতে ব্র্যান্ড নয়, "সক্রিয় উপাদান" (জেনেরিক নাম) লিখবে; একই উপাদান টানা ব্যবহার করবে না—ভিন্ন উপাদান পালা করে দেবে।
+সম্ভাষণ/ইমোজি/ফিলার নয়; শুধু কাজের পরামর্শ। কৃষি-বহির্ভূত প্রশ্নে দেবে: "আমি শুধুমাত্র কৃষি সংক্রান্ত প্রশ্নের উত্তর দিই।"
+"""
     )
 
     text = None
@@ -428,11 +459,15 @@ def chat(req: ChatRequest):
     models_to_try = GENERATIVE_MODELS or [genai.GenerativeModel(MODEL_NAME)]
     for model in models_to_try:
         try:
-            resp = model.generate_content([sys_prompt, user_msg])
+            resp = model.generate_content(
+                [sys_prompt, user_msg],
+                generation_config={"max_output_tokens": 140, "temperature": 0.6}
+            )
             t = (getattr(resp, "text", None) or "").strip()
             t = strip_banned_greetings(t)
+            t = _strip_numbered_list(t)
             if t:
-                text = t
+                text = _limit_lines(t, max_lines=5)
                 model_used = getattr(model, "model_name", None) or model_used
                 break
         except Exception as e:
