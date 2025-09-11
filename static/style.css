@@ -14,6 +14,10 @@
   --shadow: 0 8px 20px rgba(0,0,0,0.06);
   /* Approx header height so chat area fills viewport nicely in an iframe */
   --topbar-h: 56px;
+  /* Estimated composer height (textarea + mic row + paddings) */
+  --composer-h: 196px;
+  /* Safe area inset for iOS */
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
   /* Make composer smaller so log (upper box) feels larger */
   --mic-size: 78px;
   --mic-size-sm: 68px;
@@ -76,13 +80,16 @@ body{
   border: 1px solid #e6ebe6;
   border-radius: 14px;
   padding: 12px 12px 14px;
-  flex: 1 1 auto;
-  /* Give the log (upper box) more vertical space */
-  min-height: 48vh;
-  max-height: none;
-  overflow: auto;      /* only inner area scrolls when needed */
+  /* Fixed, scrollable box height so content scrolls inside */
+  flex: 0 0 auto;
+  /* Keep within viewport so the composer doesn't fall below */
+  height: min(
+    clamp(420px, 64dvh, 840px),
+    calc(100dvh - var(--topbar-h) - var(--composer-h) - 16px)
+  );
+  overflow: auto;      /* inner scrolling */
   scroll-behavior: smooth;
-  overscroll-behavior: auto; /* allow chaining to the page */
+  overscroll-behavior: auto; /* allow chaining at edges */
   scrollbar-gutter: stable;
 }
 .msg{
@@ -114,6 +121,11 @@ body{
   padding: 8px;
   box-shadow: var(--shadow);
   flex: 0 0 auto; /* fixed; no vertical growth */
+  /* Anchor to bottom and rise with keyboard/safe areas on mobile */
+  position: sticky;
+  bottom: calc(8px + var(--safe-bottom));
+  margin-top: auto; /* pushes it to bottom when extra space exists */
+  z-index: 5;
 }
 .composer textarea{
   width: 100%;
