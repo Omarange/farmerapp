@@ -8,7 +8,6 @@ const btnMic  = document.getElementById("mic");
 const btnStop = document.getElementById("stop");
 const API_CHAT = "/api/chat";
 const API_STT  = "/api/stt";
-let quickBubble = null; // chips rendered inside log as a bubble
 
 let busy = false;
 let currentController = null;
@@ -38,10 +37,6 @@ function setBtnsDisabled(disabled){
   // Keep Stop enabled so it can cancel an in-flight request or recording
   if (btnStop) btnStop.disabled = false;
   if (input) input.disabled = disabled;
-  // disable any quick chips in the log
-  if (log){
-    [...log.querySelectorAll('.chip')].forEach(b=> b.disabled = disabled);
-  }
 }
 function stopAudio(){
   if (audioEl){ try { audioEl.pause(); } catch {} audioEl = null; }
@@ -53,7 +48,7 @@ function playBase64Mp3(b64){
   audioEl.play().catch(()=>{});
 }
 function greeting(){
-  return "👋 স্বাগতম খুলনাবাসী! আগামীকাল মেঘাচ্ছন্ন; সারা দিন আকাশ মেঘলা, বজ্রসহ বৃষ্টির সম্ভাবনা। তাপমাত্রা ২৬–৩১°C, বৃষ্টির সম্ভাবনা ~৫২%";
+  return "👋 স্বাগতম খুলনাবাসী! আগামীকাল আংশিক মেঘলা; হালকা বৃষ্টির সম্ভাবনা। তাপমাত্রা ২৪–৩১°C, বৃষ্টির সম্ভাবনা ~৭৭%";
 }
 
 async function sendMessage(text, fromMic=false){
@@ -410,74 +405,3 @@ btnStop.addEventListener("click", async ()=>{
 
 // Initial greeting (unchanged)
 addBubble("bot", greeting());
-
-/* ---------- Guided quick-reply flow ---------- */
-const guided = { step: "idle", crop: null, variety: null, stage: null };
-
-// Initial crop choices (first chip row)
-const CROPS = ["ধান","বেগুন","টমেটো","শসা","মরিচ","তরমুজ","পুঁইশাক","সবজি"];
-function varietiesFor(crop){
-  if (crop === "ধান") return ["আমন","বোরো","আউশ","অন্যান্য"];
-  if (crop === "টমেটো") return ["দেশি","হাইব্রিড","অন্যান্য"];
-  if (crop === "ভুট্টা") return ["হাইব্রিড","দেশি","অন্যান্য"];
-  return ["দেশি","উন্নত/হাইব্রিড","অন্যান্য"];
-}
-const STAGES = ["বীজতলা","রোপণ/চারা","বৃদ্ধি","ফুল/শিষ","ফল/ধানি","কাটা/পরিচর্যা"];
-
-function clearQuick(){
-  if (quickBubble && quickBubble.parentNode){ quickBubble.parentNode.removeChild(quickBubble); }
-  quickBubble = null;
-}
-function renderChips(items, handler){
-  clearQuick();
-  const wrap = document.createElement('div');
-  wrap.className = 'msg bot quick-bubble';
-  const row = document.createElement('div');
-  row.className = 'quick';
-  for (const label of items){
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'chip';
-    btn.textContent = label;
-    btn.addEventListener('click', ()=> handler(label));
-    row.appendChild(btn);
-  }
-  wrap.appendChild(row);
-  log.appendChild(wrap);
-  log.scrollTop = log.scrollHeight;
-  quickBubble = wrap;
-}
-
-async function handleCropSelect(crop){
-  guided.crop = crop; guided.step = 'type';
-  // Ask model something useful after crop selection
-  const prompt = `আমার ফসল: ${crop}। এই ফসলের জন্য সাধারণ ঝুঁকি ও ৩–৫টি সংক্ষিপ্ত পরামর্শ দিন।`;
-  await sendMessage(prompt, false);
-  addBubble('bot', 'কি ধরনের/ধরন?');
-  renderChips(varietiesFor(crop), handleTypeSelect);
-}
-
-async function handleTypeSelect(typ){
-  guided.variety = typ; guided.step = 'stage';
-  const prompt = `ফসল: ${guided.crop}। ধরন: ${typ}। লক্ষ্যভিত্তিক ৩–৫টি সংক্ষিপ্ত পরামর্শ দিন।`;
-  await sendMessage(prompt, false);
-  addBubble('bot', 'কোন স্টেজ?');
-  renderChips(STAGES, handleStageSelect);
-}
-
-async function handleStageSelect(stage){
-  guided.stage = stage; guided.step = 'done';
-  const prompt = `ফসল: ${guided.crop}। ধরন: ${guided.variety}। স্টেজ: ${stage}। সম্ভাব্য রোগ-পোকা, সার-পানি ও আবহাওয়া বিবেচনায় ৩–৫টি কর্মযোগ্য পরামর্শ দিন।`;
-  await sendMessage(prompt, false);
-  renderChips(["🔁 নতুন শুরু"], ()=> startGuidedFlow(true));
-}
-
-function startGuidedFlow(reset=false){
-  guided.step = 'crop'; guided.crop = guided.variety = guided.stage = null;
-  if (reset) addBubble('bot','আবার শুরু করছি। কোন ফসল চাষ করছেন?');
-  else addBubble('bot','আপনি কোন ফসল চাষ করছেন?');
-  renderChips(CROPS, handleCropSelect);
-}
-
-// Start the guided flow automatically
-startGuidedFlow();

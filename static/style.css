@@ -157,33 +157,6 @@ body{
   justify-content: center;
   align-items: center;
 }
-.quick{
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px; /* tighter spacing */
-  justify-content: flex-start; /* left align rows to remove left blanks */
-  margin-top: 4px; /* less top margin */
-}
-.chip{
-  appearance: none;
-  border: 1px solid #cfe9d6; /* slightly stronger */
-  background: #eef7f0; /* a bit crisper */
-  color: var(--primary-ink); /* darker like question text */
-  padding: 6px 10px; /* smaller paddings */
-  border-radius: 999px;
-  font-weight: 400; /* normal, not bold */
-  font-size: 14px; /* slightly smaller text */
-  line-height: 1.2;
-  display: inline-flex; align-items: center; justify-content: center;
-  cursor: pointer;
-}
-.chip:hover{ background: #eef7f0; }
-.chip:disabled{ opacity: .55; cursor: not-allowed; }
-
-/* Quick chips rendered as a chat bubble */
-.quick-bubble{ display: inline-block; width: auto; max-width: 100%; padding: 4px 0; margin: 4px 0; background: transparent; border: 0; box-shadow: none; }
-.msg.quick-bubble, .msg.bot.quick-bubble{ background: transparent; border: 0; }
-.quick-bubble .quick{ justify-content: flex-start; gap: 6px; }
 .btn{
   appearance: none;
   border: 1px solid #cfe9d6;
@@ -302,10 +275,6 @@ body{
   /* Avoid changing host page body typography in embeds */
   /* Flex layout already controls sizing; nothing special needed here */
   .chatwrap{ height: auto; max-height: none; }
-  /* Tighter chips on small screens */
-  .quick-bubble{ padding: 4px 6px; margin: 4px; }
-  .quick{ gap: 6px; }
-  .chip{ padding: 5px 10px; font-size: 13px; }
 }
 
 /* Slightly larger phones */

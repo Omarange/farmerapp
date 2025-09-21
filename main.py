@@ -1,8 +1,10 @@
 import os
 import io
 import base64
+import json
 import re
-from typing import Optional, Tuple
+from functools import lru_cache
+from typing import List, Optional, Tuple
 from datetime import datetime, timezone
 import time
 import uuid
@@ -17,6 +19,23 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from gtts import gTTS
 import google.generativeai as genai
+
+import numpy as np
+
+from rag_utils import (
+    cosine_top_k,
+    embed_texts,
+    load_index,
+    normalize_bangla_text,
+    contains_bangla,
+)
+
+try:
+    from bangla import phonetic as _bangla_phonetic
+    _AVRO_OK = True
+except Exception:
+    _bangla_phonetic = None
+    _AVRO_OK = False
 
 # ---------- Google Cloud Speech-to-Text ----------
 try:
@@ -51,6 +70,8 @@ _TRACE_HEADER = [
     "ts", "route", "req_id", "from_mic", "lang", "model", "latency_ms",
     "user_len", "answer_len", "status", "user", "answer"
 ]
+
+USE_LLM_TRANSLIT = _truthy(os.getenv("USE_LLM_TRANSLIT", "0"))
 
 def _sanitize_text(s: Optional[str], limit: int = 500) -> str:
     if not s:
@@ -162,6 +183,33 @@ except Exception:
     # Fall back to lazy creation inside the request if something goes wrong here
     GENERATIVE_MODELS = []
 
+BASE_DIR = os.path.dirname(__file__)
+RAG_INDEX_DIR = os.getenv("RAG_INDEX_DIR", os.path.join(BASE_DIR, "data"))
+RAG_EMBEDDINGS_PATH = os.getenv("RAG_EMBEDDINGS_PATH", os.path.join(RAG_INDEX_DIR, "rag_embeddings.npy"))
+RAG_METADATA_PATH = os.getenv("RAG_METADATA_PATH", os.path.join(RAG_INDEX_DIR, "rag_metadata.json"))
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "4"))
+
+TRANSLITERATE_MODEL_NAME = os.getenv("TRANSLITERATE_MODEL", MODEL_CANDIDATES[0] if MODEL_CANDIDATES else MODEL_NAME)
+if GEMINI_API_KEY:
+    try:
+        TRANSLITERATE_MODEL = GENERATIVE_MODELS[0] if GENERATIVE_MODELS else genai.GenerativeModel(TRANSLITERATE_MODEL_NAME)
+    except Exception:
+        TRANSLITERATE_MODEL = None
+else:
+    TRANSLITERATE_MODEL = None
+
+RAG_INDEX = load_index(RAG_EMBEDDINGS_PATH, RAG_METADATA_PATH)
+if RAG_INDEX:
+    try:
+        print(f"Loaded RAG index with {len(RAG_INDEX['records'])} chunks", flush=True)
+    except Exception:
+        pass
+else:
+    try:
+        print("RAG index not found; responses may fall back to model knowledge.", flush=True)
+    except Exception:
+        pass
+
 app = FastAPI(title="FarmerApp")
 
 # CORS (open for dev; tighten for prod)
@@ -228,53 +276,163 @@ def strip_banned_greetings(s: str) -> str:
             s = s[len(opener):].lstrip(" ,।!-\n")
     return s
 
-def _strip_numbered_list(text: str) -> str:
-    """Remove leading numeric numbering like 1), ২., (3) from each line,
-    keeping dash bullets intact."""
+# ---------- RAG helpers ----------
+
+@lru_cache(maxsize=128)
+def transliterate_to_bangla(text: str) -> str:
     if not text:
+        return ""
+    if contains_bangla(text):
+        return normalize_bangla_text(text)
+    if _AVRO_OK and _bangla_phonetic:
+        try:
+            translit = _bangla_phonetic.parse(text)
+            translit = normalize_bangla_text(translit)
+            if translit:
+                return translit
+        except Exception as exc:
+            print("Bangla phonetic transliteration error:", repr(exc))
+    if not USE_LLM_TRANSLIT or not TRANSLITERATE_MODEL:
         return text
-    bn_digits = "০১২৩৪৫৬৭৮৯"
-    pat = re.compile(rf"^\s*(?:\(?[{bn_digits}0-9]{{1,2}}\)?[)\.:\-]?)\s+")
-    out_lines = []
-    for ln in str(text).splitlines():
-        out_lines.append(pat.sub("", ln))
-    return "\n".join(out_lines)
+    prompt = (
+        "নীচের Banglish/latin বর্ণে লেখা বাক্যকে বাংলা অক্ষরে লিখুন। "
+        "শুধুমাত্র বাংলা বাক্য দিন, অন্য কোন মন্তব্য নয়।\n"
+        f"Banglish: {text}"
+    )
+    try:
+        resp = TRANSLITERATE_MODEL.generate_content(
+            prompt,
+            generation_config={"max_output_tokens": 120, "temperature": 0.1},
+        )
+        translit = (getattr(resp, "text", None) or "").strip()
+        translit = translit.replace('"', "").replace("'", "").strip()
+        return normalize_bangla_text(translit) or text
+    except Exception as e:
+        print("Transliteration error:", repr(e))
+        return text
 
-def _limit_lines(text: str, max_lines: int = 5) -> str:
-    """Clamp output to at most max_lines by preferring existing line breaks,
-    else splitting on Bengali/English sentence delimiters. Keeps order.
-    """
+
+def _extract_bangla_keywords(text: str) -> List[str]:
     if not text:
-        return text
-    # Prefer explicit newlines
-    lines = [ln.strip() for ln in str(text).split("\n") if ln.strip()]
-    if len(lines) > 1:
-        return "\n".join(lines[:max_lines])
-    # Fallback to sentence split (Bengali danda + common punctuation)
-    parts = [p.strip() for p in re.split(r"[।.!?]+\s*", str(text)) if p.strip()]
-    if not parts:
-        return text.strip()
-    kept = parts[:max_lines]
-    # Re-join as lines
-    return "\n".join(kept)
+        return []
+    norm = normalize_bangla_text(text)
+    if not norm:
+        return []
+    tokens = re.findall(r"[\u0980-\u09FF]{2,}", norm)
+    seen = set()
+    out = []
+    for token in tokens:
+        if token not in seen:
+            seen.add(token)
+            out.append(token)
+    return out
 
-# ---------- Scope guard: Agriculture-only ----------
-_AGRI_KEYWORDS = [
-    # Bengali terms (common crops, tasks, pests, inputs, weather)
-    "কৃষি","ফসল","শস্য","ধান","গম","ভুট্টা","টমেটো","আলু","বেগুন","শসা","মরিচ","তরমুজ","পেঁয়াজ","ডাল","সরিষা","পাট","সবজি","ফল",
-    "বীজ","চারা","রোপণ","কাটাই","ফসল কাটা","ফলন","রোগ","পোকা","কীট","কীটনাশক","জৈব","সার","সেচ","পানি","সেচব্যবস্থা",
-    "মাটি","pH","পিএইচ","মাটির","আগাছা","ছত্রাক","বালাই","আবহাওয়া","বৃষ্টি","খরা","শিলাবৃষ্টি","তাপমাত্রা","আর্দ্রতা",
-    # English helpers
-    "agri","agriculture","crop","farmer","harvest","yield","seed","seedling","planting","irrigation","fertilizer","pesticide","soil","weather"
-]
-_AGRI_RE = re.compile(r"(" + r"|".join([re.escape(w) for w in _AGRI_KEYWORDS]) + r")", re.IGNORECASE)
 
-def is_agri_related(text: str) -> bool:
-    """Shallow keyword gate to keep scope strictly agricultural."""
-    t = (text or "").strip()
-    if not t:
-        return False
-    return bool(_AGRI_RE.search(t))
+def retrieve_contexts(primary: str, alt_queries: Optional[List[str]] = None, top_k: int = RAG_TOP_K) -> List[dict]:
+    if not RAG_INDEX:
+        return []
+
+    queries: List[str] = []
+    for candidate in [primary] + list(alt_queries or []):
+        cand = (candidate or "").strip()
+        if not cand:
+            continue
+        if contains_bangla(cand):
+            cand = normalize_bangla_text(cand)
+        if cand and cand not in queries:
+            queries.append(cand)
+
+    if not queries:
+        return []
+
+    aggregated = {}
+    for q in queries:
+        try:
+            vectors = embed_texts([q])
+        except Exception as e:
+            print("Embedding error:", repr(e))
+            continue
+        if not isinstance(vectors, np.ndarray) or vectors.size == 0:
+            continue
+        hits = cosine_top_k(RAG_INDEX, vectors[0], k=top_k)
+        for hit in hits:
+            idx = hit.get("index")
+            if idx is None:
+                continue
+            prev = aggregated.get(idx)
+            score = float(hit.get("score", 0.0))
+            if not prev or score > prev["score"]:
+                aggregated[idx] = {**hit, "score": score, "query": q}
+
+    if not aggregated:
+        return []
+
+    # Keyword re-ranking to keep crop-specific chunks on top
+    keyword_source = primary
+    if keyword_source and not contains_bangla(keyword_source):
+        keyword_source = transliterate_to_bangla(keyword_source)
+    keywords = _extract_bangla_keywords(keyword_source)
+
+    if keywords:
+        for rec in aggregated.values():
+            text_norm = normalize_bangla_text(rec.get("text", ""))
+            source_norm = normalize_bangla_text(rec.get("source", ""))
+            hits = 0
+            for kw in keywords:
+                if kw in text_norm or kw in source_norm:
+                    hits += 1
+            rec["_kw_hits"] = hits
+        max_hits = max(rec.get("_kw_hits", 0) for rec in aggregated.values())
+    else:
+        max_hits = 0
+
+    if max_hits > 0:
+        results = sorted(
+            aggregated.values(),
+            key=lambda r: (r.get("_kw_hits", 0), r["score"]),
+            reverse=True,
+        )
+    else:
+        results = sorted(aggregated.values(), key=lambda r: r["score"], reverse=True)
+
+    for rec in results:
+        rec.pop("_kw_hits", None)
+
+    return results[:top_k]
+
+
+def format_context_block(records: List[dict]) -> str:
+    if not records:
+        return ""
+    lines: List[str] = []
+    for idx, rec in enumerate(records, start=1):
+        source = rec.get("source", "অজানা উৎস")
+        page = rec.get("page")
+        header = f"[{idx}] উৎস: {source}"
+        if page:
+            header += f", পৃষ্ঠা {page}"
+        lines.append(header)
+        payload = normalize_bangla_text(rec.get("text", ""))
+        lines.append(payload)
+    return "\n".join(lines)
+
+
+def context_summary(records: List[dict]) -> str:
+    if not records:
+        return ""
+    parts = []
+    for rec in records:
+        parts.append(
+            json.dumps(
+                {
+                    "source": rec.get("source"),
+                    "page": rec.get("page"),
+                    "score": round(rec.get("score", 0.0), 4),
+                },
+                ensure_ascii=False,
+            )
+        )
+    return "[" + ", ".join(parts) + "]"
 
 # ---------- Tracing helpers are defined above ----------
 
@@ -427,32 +585,59 @@ def chat(req: ChatRequest):
         })
         return {"answer": text, "audio_b64": audio_b64}
 
-    # 2) Strict agriculture-only guard (block obvious out-of-scope before model call)
-    if not is_agri_related(user_msg):
-        text = (
-            "আমি শুধুমাত্র কৃষি সংক্রান্ত প্রশ্নের উত্তর দিই। "
-            "ফসল, রোগ-পোকা, সার/সেচ, মাটি, আবহাওয়া, ফলন ইত্যাদি বিষয়ে প্রশ্ন করুন।"
-        )
+    bangla_query = transliterate_to_bangla(user_msg)
+
+    query_variants: List[str] = []
+    if bangla_query:
+        query_variants.append(bangla_query)
+    if user_msg and user_msg not in query_variants:
+        query_variants.append(user_msg)
+    if not contains_bangla(user_msg):
+        roman_lower = re.sub(r"[^a-z0-9\s]", " ", user_msg.lower())
+        roman_lower = re.sub(r"\s+", " ", roman_lower).strip()
+        if roman_lower and roman_lower not in query_variants:
+            query_variants.append(roman_lower)
+
+    primary_query = query_variants[0] if query_variants else user_msg
+    alt_queries = query_variants[1:] if len(query_variants) > 1 else []
+
+    contexts = retrieve_contexts(primary_query, alt_queries=alt_queries)
+    context_block = format_context_block(contexts)
+
+    if contexts:
+        try:
+            print("RAG contexts:", context_summary(contexts), flush=True)
+        except Exception:
+            pass
+
+    if RAG_INDEX and not contexts:
+        text = "দুঃখিত, আমাদের নথিতে এই বিষয়ে কিছু পাইনি।"
         audio_b64 = synthesize_tts(text, language=req.language or "bn-BD") if req.from_mic else None
         _trace_chat_csv({
             "ts": datetime.now(timezone.utc).isoformat(),
             "route": "/api/chat", "req_id": req_id, "from_mic": bool(req.from_mic),
-            "lang": req.language or "bn-BD", "model": MODEL_NAME, "latency_ms": int((time.time()-t0)*1000),
-            "user_len": len(user_msg), "answer_len": len(text), "status": "out_of_scope",
-            "user": _sanitize_text(user_msg), "answer": _sanitize_text(text)
+            "lang": req.language or "bn-BD", "model": model_used, "latency_ms": int((time.time()-t0)*1000),
+            "user_len": len(user_msg), "answer_len": len(text), "status": "no_context",
+            "user": _sanitize_text(user_msg), "answer": _sanitize_text(text),
         })
         return {"answer": text, "audio_b64": audio_b64}
 
-    # 3) Gemini call with strict 3–5 line output (Bangla)
     sys_prompt = (
-        """তুমি একজন কৃষি সহায়ক। সবসময় বাংলায় উত্তর দেবে।
-শুধু ৩–৫টি ছোট লাইনে উত্তর দেবে—কখনও ৫ লাইন অতিক্রম করবে না। নম্বরযুক্ত পয়েন্ট (১/2/3/4) দেবে না; প্রয়োজনে ড্যাশ (-) দিয়ে ছোট লাইন, নইলে ৩–৫টি বাক্যের অনুচ্ছেদ।
-অগ্রাধিকার ক্রমে কভার করবে: সার/ডোজ; পানি/নিষ্কাশন; আবহাওয়া-ভিত্তিক করণীয়; কীটনাশক বা রোগ–পোকা (প্রাসঙ্গিক হলে এক লাইনে); নিরাপত্তা/PHI/REI (এক লাইনে)।
-সংখ্যা ও একক (কেজি/বিঘা, কেজি/একর, মি.লি./লিটার, লিটার/একর) স্পষ্ট করবে।
-কীটনাশক বলতে ব্র্যান্ড নয়, "সক্রিয় উপাদান" (জেনেরিক নাম) লিখবে; একই উপাদান টানা ব্যবহার করবে না—ভিন্ন উপাদান পালা করে দেবে।
-সম্ভাষণ/ইমোজি/ফিলার নয়; শুধু কাজের পরামর্শ। কৃষি-বহির্ভূত প্রশ্নে দেবে: "আমি শুধুমাত্র কৃষি সংক্রান্ত প্রশ্নের উত্তর দিই।"
-"""
+        "তুমি একজন কৃষি সহায়ক। সবসময় বাংলায় উত্তর দেবে। "
+        "প্রদত্ত প্রসঙ্গ ব্যবহার করে ৩–৫টি কর্মযোগ্য লাইন বা ছোট বাক্য লিখবে; লাইনের শুরুতে নম্বর ব্যবহার করবে না, প্রয়োজনে '-' ব্যবহার করতে পারো। "
+        "প্রসঙ্গে তথ্য না থাকলে 'দুঃখিত, প্রাসঙ্গিক তথ্য পাইনি।' লিখে থামবে। "
+        "অগ্রাধিকার ক্রমে সার/ডোজ, পানি ও নিষ্কাশন, আবহাওয়া-ভিত্তিক করণীয়, রোগ-পোকা এবং নিরাপত্তা উল্লেখ করবে যখন প্রাসঙ্গিক। "
+        "সংখ্যা ও একক অবশ্যই প্রসঙ্গ থেকে নেবে এবং কীটনাশকের ক্ষেত্রে সক্রিয় উপাদানের নাম উল্লেখ করবে। "
+        "সম্ভাষণ, ইমোজি বা ফিলার বাক্য ব্যবহার করবে না।"
     )
+
+    prompt_parts: List[str] = []
+    if context_block:
+        prompt_parts.append("প্রসঙ্গ:\n" + context_block)
+    prompt_parts.append(f"ব্যবহারকারীর প্রশ্ন (Banglish): {user_msg}")
+    if bangla_query and bangla_query != user_msg:
+        prompt_parts.append(f"ব্যবহারকারীর প্রশ্ন (বাংলা): {bangla_query}")
+    user_prompt = "\n\n".join(prompt_parts)
 
     text = None
     last_err = None
@@ -460,14 +645,13 @@ def chat(req: ChatRequest):
     for model in models_to_try:
         try:
             resp = model.generate_content(
-                [sys_prompt, user_msg],
-                generation_config={"max_output_tokens": 140, "temperature": 0.6}
+                [sys_prompt, user_prompt],
+                generation_config={"max_output_tokens": 200, "temperature": 0.4},
             )
             t = (getattr(resp, "text", None) or "").strip()
             t = strip_banned_greetings(t)
-            t = _strip_numbered_list(t)
             if t:
-                text = _limit_lines(t, max_lines=5)
+                text = t
                 model_used = getattr(model, "model_name", None) or model_used
                 break
         except Exception as e:

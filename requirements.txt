@@ -7,3 +7,7 @@ google-generativeai
 jinja2
 python-multipart
 google-cloud-speech
+numpy
+pymupdf
+bangla
+python-docx
