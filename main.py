@@ -4,7 +4,8 @@ import base64
 import json
 import re
 from functools import lru_cache
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import List, Optional, Tuple, Dict, Set
 from datetime import datetime, timezone
 import time
 import uuid
@@ -320,7 +321,7 @@ def _extract_bangla_keywords(text: str) -> List[str]:
         return []
     tokens = re.findall(r"[\u0980-\u09FF]{2,}", norm)
     seen = set()
-    out = []
+    out: List[str] = []
     for token in tokens:
         if token not in seen:
             seen.add(token)
@@ -328,7 +329,149 @@ def _extract_bangla_keywords(text: str) -> List[str]:
     return out
 
 
-def retrieve_contexts(primary: str, alt_queries: Optional[List[str]] = None, top_k: int = RAG_TOP_K) -> List[dict]:
+STAGE_QUERY_TOKENS: Dict[str, List[str]] = {
+    "seedbed": ["বীজতলা", "নার্সারি", "অঙ্কুরণ", "seedbed", "nursery"],
+    "transplant": ["রোপণ", "চারা রোপণ", "রোপাই", "transplant", "রোপণের", "চারা লাগানো", "planting"],
+    "vegetative": ["পরিচর্যা", "বৃদ্ধি", "পাতা", "vegetative", "পরিচর্যা", "growing"],
+    "flower": ["ফুল", "শিষ", "flower", "flowering"],
+    "fruit": ["ফল", "ফল গঠন", "fruit", "ফল ধরা", "fruiting"],
+    "harvest": ["কাটা", "সংগ্রহ", "পরিপক্ব", "harvest", "কবে তুলবো", "kokhon", "kakhon", "kobe", "season", "সময়"],
+}
+
+
+TOPIC_QUERY_TOKENS: Dict[str, List[str]] = {
+    "fertilizer": ["সার", "ডোজ", "ইউরিয়া", "ডিএপি", "fertilizer", "dose", "fert"],
+    "water": ["সেচ", "পানি", "ড্রেনেজ", "drainage", "সেচের", "পানি দেব"],
+    "pest": ["রোগ", "পোকা", "কীট", "কীটনাশক", "disease", "ipm", "রোগের"],
+    "weather": ["আবহাওয়া", "বৃষ্টি", "তাপমাত্রা", "আর্দ্রতা", "weather", "কখন বৃষ্টি", "season"],
+    "soil": ["মাটি", "pH", "পিএইচ", "soil", "মাটির"],
+    "variety": ["জাত", "হাইব্রিড", "বারি", "variety", "cultivar", "hybrid", "উন্নত জাত", "বারি ১৪", "বীজ"],
+}
+
+
+_DOC_KEYWORDS: Optional[Dict[str, Dict[str, Set[str]]]] = None
+_DOC_INFO: Optional[Dict[str, Dict[str, object]]] = None
+
+
+def _build_doc_keywords(records: List[dict]) -> Tuple[Dict[str, Dict[str, Set[str]]], Dict[str, Dict[str, object]]]:
+    mapping: Dict[str, Dict[str, Set[str]]] = {}
+    info: Dict[str, Dict[str, object]] = {}
+    common_roman = {"final", "file", "files", "doc", "docx", "data", "finale"}
+    for rec in records or []:
+        src = (rec.get("source") or "").strip()
+        if not src:
+            continue
+        stem = Path(src).stem
+        entry = mapping.setdefault(src, {"bn": set(), "roman": set()})
+        meta = rec.get("meta") or {}
+
+        for token in _extract_bangla_keywords(stem):
+            entry["bn"].add(token)
+        for token in re.findall(r"[A-Za-z]{3,}", stem.lower()):
+            if token not in common_roman:
+                entry["roman"].add(token)
+
+        synonyms = meta.get("synonyms") or []
+        for syn in synonyms:
+            syn_str = str(syn).strip()
+            if not syn_str:
+                continue
+            if contains_bangla(syn_str):
+                entry["bn"].add(normalize_bangla_text(syn_str))
+            else:
+                entry["roman"].add(syn_str.lower())
+
+        doc_meta = info.setdefault(src, {
+            "crop_ids": set(),
+            "crop_bn": meta.get("crop_bn"),
+            "category": meta.get("category"),
+            "synonyms": set(),
+            "stage_tags": set(),
+            "topic_tags": set(),
+        })
+
+        crop_id = meta.get("crop_id")
+        if crop_id:
+            doc_meta["crop_ids"].add(crop_id)
+        if meta.get("category") and not doc_meta.get("category"):
+            doc_meta["category"] = meta.get("category")
+        doc_meta["synonyms"].update(str(s).strip() for s in synonyms if str(s).strip())
+        doc_meta["stage_tags"].update(meta.get("stage_tags") or [])
+        doc_meta["topic_tags"].update(meta.get("topic_tags") or [])
+
+    return mapping, info
+
+
+def _doc_keywords() -> Dict[str, Dict[str, Set[str]]]:
+    global _DOC_KEYWORDS, _DOC_INFO
+    if _DOC_KEYWORDS is None or _DOC_INFO is None:
+        if RAG_INDEX:
+            mapping, info = _build_doc_keywords(RAG_INDEX.get("records") or [])
+            _DOC_KEYWORDS = mapping
+            _DOC_INFO = info
+        else:
+            _DOC_KEYWORDS = {}
+            _DOC_INFO = {}
+    return _DOC_KEYWORDS
+
+
+def _doc_info() -> Dict[str, Dict[str, object]]:
+    _ = _doc_keywords()
+    return _DOC_INFO or {}
+
+
+def _match_sources(bangla_query: str, original_query: str) -> Tuple[Set[str], Dict[str, int]]:
+    keywords_map = _doc_keywords()
+    doc_info = _doc_info()
+    if not keywords_map:
+        return set(), {}
+
+    query_bn = normalize_bangla_text(bangla_query or "")
+    roman_tokens = re.findall(r"[a-z]{3,}", (original_query or "").lower())
+    roman_token_set = set(roman_tokens)
+
+    counts: Dict[str, int] = {}
+    for src, toks in keywords_map.items():
+        hits = 0
+        for kw in toks.get("bn", set()):
+            if kw and kw in query_bn:
+                hits += 1
+        if not hits and roman_tokens:
+            roman_kw = toks.get("roman", set())
+            if roman_kw and any(rt in roman_kw for rt in roman_tokens):
+                hits += 1
+        if not hits and doc_info.get(src, {}).get("synonyms"):
+            for syn in doc_info[src]["synonyms"]:
+                syn_str = str(syn).strip().lower()
+                if not syn_str:
+                    continue
+                if contains_bangla(syn_str):
+                    if normalize_bangla_text(syn_str) in query_bn:
+                        hits += 1
+                        break
+                else:
+                    if syn_str in roman_token_set:
+                        hits += 1
+                        break
+        if hits:
+            counts[src] = hits
+
+    if not counts:
+        return set(), {}
+
+    max_hits = max(counts.values())
+    matched = {src for src, value in counts.items() if value == max_hits and value > 0}
+    return matched, counts
+
+
+def retrieve_contexts(
+    primary: str,
+    alt_queries: Optional[List[str]] = None,
+    *,
+    matched_sources: Optional[Set[str]] = None,
+    boost_ctx: Optional[Dict[str, object]] = None,
+    top_k: int = RAG_TOP_K,
+) -> List[dict]:
     if not RAG_INDEX:
         return []
 
@@ -364,23 +507,124 @@ def retrieve_contexts(primary: str, alt_queries: Optional[List[str]] = None, top
             if not prev or score > prev["score"]:
                 aggregated[idx] = {**hit, "score": score, "query": q}
 
-    if not aggregated:
-        return []
+    if matched_sources:
+        filtered = {idx: rec for idx, rec in aggregated.items() if rec.get("source") in matched_sources}
+        if filtered:
+            aggregated = filtered
 
-    # Keyword re-ranking to keep crop-specific chunks on top
     keyword_source = primary
     if keyword_source and not contains_bangla(keyword_source):
         keyword_source = transliterate_to_bangla(keyword_source)
     keywords = _extract_bangla_keywords(keyword_source)
 
+    def keyword_hits(rec, tokens):
+        if not tokens:
+            return 0
+        text_norm = normalize_bangla_text(rec.get("text", ""))
+        return sum(1 for kw in tokens if kw and kw in text_norm)
+
     if keywords:
+        normalized_keywords = [normalize_bangla_text(kw) for kw in keywords]
+    else:
+        normalized_keywords = []
+
+    if matched_sources and normalized_keywords:
+        has_keyword_match = any(keyword_hits(rec, normalized_keywords) > 0 for rec in aggregated.values())
+        if not has_keyword_match:
+            rescue_candidates = []
+            for idx, rec in enumerate(RAG_INDEX.get("records") or []):
+                if rec.get("source") not in matched_sources:
+                    continue
+                hits = keyword_hits(rec, normalized_keywords)
+                if hits:
+                    rescue_candidates.append((idx, hits, len(rec.get("text", ""))))
+            rescue_candidates.sort(key=lambda x: (-x[1], x[2]))
+            for idx, hits, _ in rescue_candidates[:max(top_k, 6)]:
+                if idx in aggregated:
+                    continue
+                rec = RAG_INDEX["records"][idx]
+                aggregated[idx] = {**rec, "score": hits * 0.1, "query": "keyword_rescue"}
+
+    if not aggregated:
+        return []
+
+    doc_info = _doc_info()
+    preferred_sources = set(matched_sources or set())
+    preferred_crops = set()
+    preferred_categories = set()
+    preferred_stage_tags = set()
+    preferred_topic_tags = set()
+
+    query_stage_tags = set()
+    query_topic_tags = set()
+    query_bn_text = ""
+    roman_tokens: List[str] = []
+
+    if boost_ctx:
+        preferred_crops.update(boost_ctx.get("preferred_crops", set()))
+        preferred_categories.update(boost_ctx.get("preferred_categories", set()))
+        preferred_stage_tags.update(boost_ctx.get("preferred_stage_tags", set()))
+        preferred_topic_tags.update(boost_ctx.get("preferred_topic_tags", set()))
+        query_stage_tags.update(boost_ctx.get("query_stage_tags", set()))
+        query_topic_tags.update(boost_ctx.get("query_topic_tags", set()))
+        query_bn_text = normalize_bangla_text(boost_ctx.get("query_bangla", "")) if boost_ctx.get("query_bangla") else ""
+        roman_tokens = list(boost_ctx.get("query_roman_tokens", []))
+    roman_token_set = {tok.lower() for tok in roman_tokens}
+
+    for rec in aggregated.values():
+        meta = rec.get("meta") or {}
+        boost = 1.0
+        crop_id = meta.get("crop_id")
+        category = meta.get("category")
+
+        if preferred_sources and rec.get("source") in preferred_sources:
+            boost += 0.2
+        if preferred_crops and crop_id in preferred_crops:
+            boost += 0.35
+        elif preferred_categories and category in preferred_categories:
+            boost += 0.12
+
+        stage_tags = set(meta.get("stage_tags") or [])
+        stage_hits = len(stage_tags & preferred_stage_tags)
+        if stage_hits:
+            boost += 0.05 * stage_hits
+
+        if query_stage_tags:
+            query_stage_hits = len(stage_tags & query_stage_tags)
+            if query_stage_hits:
+                boost += 0.04 * query_stage_hits
+
+        topic_tags = set(meta.get("topic_tags") or [])
+        topic_hits = len(topic_tags & preferred_topic_tags)
+        if topic_hits:
+            boost += 0.04 * topic_hits
+
+        if query_topic_tags:
+            query_topic_hits = len(topic_tags & query_topic_tags)
+            if query_topic_hits:
+                boost += 0.03 * query_topic_hits
+
+        syn_hits = 0
+        for syn in meta.get("synonyms", []) or []:
+            syn_str = str(syn).strip()
+            if not syn_str:
+                continue
+            if contains_bangla(syn_str):
+                bn_syn = normalize_bangla_text(syn_str)
+                if bn_syn and bn_syn in query_bn_text:
+                    syn_hits += 1
+            else:
+                if syn_str.lower() in roman_token_set:
+                    syn_hits += 1
+        if syn_hits:
+            boost += 0.03 * syn_hits
+
+        rec["score"] = rec["score"] * boost
+
+    # Keyword re-ranking to keep crop-specific chunks on top
+    if normalized_keywords:
         for rec in aggregated.values():
-            text_norm = normalize_bangla_text(rec.get("text", ""))
-            source_norm = normalize_bangla_text(rec.get("source", ""))
-            hits = 0
-            for kw in keywords:
-                if kw in text_norm or kw in source_norm:
-                    hits += 1
+            hits = keyword_hits(rec, normalized_keywords)
             rec["_kw_hits"] = hits
         max_hits = max(rec.get("_kw_hits", 0) for rec in aggregated.values())
     else:
@@ -395,10 +639,19 @@ def retrieve_contexts(primary: str, alt_queries: Optional[List[str]] = None, top
     else:
         results = sorted(aggregated.values(), key=lambda r: r["score"], reverse=True)
 
+    seen_pages = set()
+    deduped = []
     for rec in results:
         rec.pop("_kw_hits", None)
+        key = (rec.get("source"), rec.get("page"))
+        if key in seen_pages:
+            continue
+        seen_pages.add(key)
+        deduped.append(rec)
+        if len(deduped) >= top_k:
+            break
 
-    return results[:top_k]
+    return deduped[:top_k]
 
 
 def format_context_block(records: List[dict]) -> str:
@@ -601,17 +854,120 @@ def chat(req: ChatRequest):
     primary_query = query_variants[0] if query_variants else user_msg
     alt_queries = query_variants[1:] if len(query_variants) > 1 else []
 
-    contexts = retrieve_contexts(primary_query, alt_queries=alt_queries)
+    matched_sources, source_hits = _match_sources(bangla_query, user_msg)
+
+    doc_info = _doc_info()
+    preferred_crops: Set[str] = set()
+    preferred_categories: Set[str] = set()
+    preferred_stage_tags: Set[str] = set()
+    preferred_topic_tags: Set[str] = set()
+    synonym_expansions: Set[str] = set()
+
+    for src in matched_sources:
+        info = doc_info.get(src) or {}
+        preferred_crops.update(info.get("crop_ids", set()))
+        if info.get("category"):
+            preferred_categories.add(info.get("category"))
+        preferred_stage_tags.update(info.get("stage_tags", set()))
+        preferred_topic_tags.update(info.get("topic_tags", set()))
+        synonym_expansions.update(info.get("synonyms", set()))
+
+    user_msg_lower = (user_msg or "").lower()
+    for syn in synonym_expansions:
+        syn_str = str(syn).strip()
+        if not syn_str:
+            continue
+        if contains_bangla(syn_str):
+            syn_bn = normalize_bangla_text(syn_str)
+            if syn_bn and syn_bn not in query_variants:
+                query_variants.append(syn_bn)
+        else:
+            syn_l = syn_str.lower()
+            if syn_l and syn_l not in query_variants:
+                query_variants.append(syn_l)
+            syn_bn = transliterate_to_bangla(syn_str)
+            if syn_bn and syn_bn not in query_variants:
+                query_variants.append(syn_bn)
+
+    # Add stage-specific tokens for expansion
+    for stage in preferred_stage_tags:
+        for token in STAGE_QUERY_TOKENS.get(stage, []):
+            if contains_bangla(token):
+                tok_bn = normalize_bangla_text(token)
+                if tok_bn and tok_bn not in query_variants:
+                    query_variants.append(tok_bn)
+            else:
+                tok_l = token.lower()
+                if tok_l and tok_l not in query_variants:
+                    query_variants.append(tok_l)
+
+    # Recompute primary/alt after expansion
+    primary_query = query_variants[0] if query_variants else user_msg
+    alt_queries = query_variants[1:] if len(query_variants) > 1 else []
+
+    query_stage_tags: Set[str] = set()
+    query_topic_tags: Set[str] = set()
+    bn_for_detection = normalize_bangla_text(bangla_query)
+    for stage, tokens in STAGE_QUERY_TOKENS.items():
+        for token in tokens:
+            if contains_bangla(token):
+                if normalize_bangla_text(token) and normalize_bangla_text(token) in bn_for_detection:
+                    query_stage_tags.add(stage)
+                    break
+            else:
+                if token.lower() in user_msg_lower:
+                    query_stage_tags.add(stage)
+                    break
+    for topic, tokens in TOPIC_QUERY_TOKENS.items():
+        for token in tokens:
+            if contains_bangla(token):
+                if normalize_bangla_text(token) and normalize_bangla_text(token) in bn_for_detection:
+                    query_topic_tags.add(topic)
+                    break
+            else:
+                if token.lower() in user_msg_lower:
+                    query_topic_tags.add(topic)
+                    break
+
+    roman_token_set = set(re.findall(r"[a-z]{3,}", user_msg_lower))
+
+    boost_ctx = {
+        "preferred_crops": preferred_crops,
+        "preferred_categories": preferred_categories,
+        "preferred_stage_tags": preferred_stage_tags,
+        "preferred_topic_tags": preferred_topic_tags,
+        "query_stage_tags": query_stage_tags,
+        "query_topic_tags": query_topic_tags,
+        "query_bangla": bangla_query,
+        "query_roman_tokens": roman_token_set,
+    }
+
+    contexts = retrieve_contexts(
+        primary_query,
+        alt_queries=alt_queries,
+        matched_sources=matched_sources,
+        boost_ctx=boost_ctx,
+    )
     context_block = format_context_block(contexts)
 
     if contexts:
         try:
-            print("RAG contexts:", context_summary(contexts), flush=True)
+            debug = {
+                "contexts": context_summary(contexts),
+                "matched_sources": list(matched_sources) if matched_sources else [],
+                "source_hits": source_hits,
+            }
+            print("RAG contexts:", json.dumps(debug, ensure_ascii=False), flush=True)
         except Exception:
             pass
 
     if RAG_INDEX and not contexts:
-        text = "দুঃখিত, আমাদের নথিতে এই বিষয়ে কিছু পাইনি।"
+        if matched_sources:
+            doc_names = [Path(src).stem for src in matched_sources]
+            doc_label = " বা ".join(doc_names)
+            text = f"দুঃখিত, {doc_label} নথিতে এই প্রশ্নের সাথে মেলানো কোনো তথ্য পাইনি।"
+        else:
+            text = "দুঃখিত, আমাদের নথিতে এই বিষয়ে কিছু পাইনি।"
         audio_b64 = synthesize_tts(text, language=req.language or "bn-BD") if req.from_mic else None
         _trace_chat_csv({
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -634,6 +990,9 @@ def chat(req: ChatRequest):
     prompt_parts: List[str] = []
     if context_block:
         prompt_parts.append("প্রসঙ্গ:\n" + context_block)
+    if matched_sources:
+        doc_names = ", ".join(sorted({Path(src).stem for src in matched_sources}))
+        prompt_parts.append(f"এই উত্তরে শুধুমাত্র {doc_names} নথি থেকে তথ্য ব্যবহার করবে।")
     prompt_parts.append(f"ব্যবহারকারীর প্রশ্ন (Banglish): {user_msg}")
     if bangla_query and bangla_query != user_msg:
         prompt_parts.append(f"ব্যবহারকারীর প্রশ্ন (বাংলা): {bangla_query}")

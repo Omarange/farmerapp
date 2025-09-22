@@ -30,6 +30,7 @@ function addBubble(role, text){
   div.textContent = text;
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
+  return div;
 }
 function setBtnsDisabled(disabled){
   if (btnSend) btnSend.disabled = disabled;
@@ -57,6 +58,9 @@ async function sendMessage(text, fromMic=false){
   addBubble("user", text);
   input.value = "";
 
+  const waiting = addBubble("bot", "ডকুমেন্ট থেকে তথ্য খোঁজা হচ্ছে…");
+  waiting.dataset.loading = "1";
+
   currentController = new AbortController();
   try{
     const r = await fetch(API_CHAT, {
@@ -67,14 +71,16 @@ async function sendMessage(text, fromMic=false){
     });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const data = await r.json();
-    addBubble("bot", (data && data.answer) ? data.answer : "উত্তর পাওয়া যায়নি।");
+    waiting.textContent = (data && data.answer) ? data.answer : "উত্তর পাওয়া যায়নি।";
+    waiting.dataset.loading = "0";
     if (data && data.audio_b64) playBase64Mp3(data.audio_b64);
   }catch(e){
     if (e && (e.name === 'AbortError' || (typeof e.message === 'string' && e.message.toLowerCase().includes('abort')))){
-      addBubble("bot","⏹ থামানো হয়েছে।");
+      waiting.textContent = "⏹ থামানো হয়েছে।";
     } else {
-      addBubble("bot","সার্ভারে সংযোগে সমস্যা হয়েছে।");
+      waiting.textContent = "সার্ভারে সংযোগে সমস্যা হয়েছে।";
     }
+    waiting.dataset.loading = "0";
   }finally{
     busy = false; setBtnsDisabled(false); currentController = null;
   }
