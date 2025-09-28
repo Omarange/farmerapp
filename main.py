@@ -3,6 +3,9 @@ import io
 import base64
 import json
 import re
+import subprocess
+import tempfile
+import shutil
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Set
@@ -51,10 +54,24 @@ except Exception:
 # ---------- Config ----------
 load_dotenv()
 
-# Accept either "models/gemini-1.5-*" or "gemini-1.5-*"
-_RAW_MODEL = os.getenv("MODEL_NAME", "gemini-1.5-pro").strip()
-MODEL_NAME = _RAW_MODEL.replace("models/", "")  # normalize for SDK
+def _safe_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"Invalid int for {name}: {raw!r}; using {default}", flush=True)
+        return default
+
+# Force the canonical Gemini model for all usage.
+MODEL_NAME = "gemini-2.5-flash"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MAX_OUTPUT_TOKENS = _safe_int_env("GEMINI_MAX_OUTPUT_TOKENS", 2048)
+GEMINI_MAX_OUTPUT_TOKENS_CAP = _safe_int_env(
+    "GEMINI_MAX_OUTPUT_TOKENS_CAP",
+    max(8192, GEMINI_MAX_OUTPUT_TOKENS),
+)
 
 # Optional: pin STT region (e.g., "asia-south1-speech.googleapis.com")
 GOOGLE_SPEECH_ENDPOINT = os.getenv("GOOGLE_SPEECH_ENDPOINT", "").strip()
@@ -170,16 +187,9 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 # Prepare reusable Gemini model instances (avoid per-request construction)
-MODEL_CANDIDATES = []
+MODEL_CANDIDATES = [MODEL_NAME]
 try:
-    _cands = [MODEL_NAME, "gemini-1.5-flash", "gemini-1.5-pro"]
-    seen = set()
-    for n in _cands:
-        n2 = (n or "").strip()
-        if n2 and n2 not in seen:
-            MODEL_CANDIDATES.append(n2)
-            seen.add(n2)
-    GENERATIVE_MODELS = [genai.GenerativeModel(n) for n in MODEL_CANDIDATES] if GEMINI_API_KEY else []
+    GENERATIVE_MODELS = [genai.GenerativeModel(MODEL_NAME)] if GEMINI_API_KEY else []
 except Exception:
     # Fall back to lazy creation inside the request if something goes wrong here
     GENERATIVE_MODELS = []
@@ -189,6 +199,7 @@ RAG_INDEX_DIR = os.getenv("RAG_INDEX_DIR", os.path.join(BASE_DIR, "data"))
 RAG_EMBEDDINGS_PATH = os.getenv("RAG_EMBEDDINGS_PATH", os.path.join(RAG_INDEX_DIR, "rag_embeddings.npy"))
 RAG_METADATA_PATH = os.getenv("RAG_METADATA_PATH", os.path.join(RAG_INDEX_DIR, "rag_metadata.json"))
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "4"))
+RAG_MAX_QUERY_VARIANTS = _safe_int_env("RAG_MAX_QUERY_VARIANTS", 4)
 
 TRANSLITERATE_MODEL_NAME = os.getenv("TRANSLITERATE_MODEL", MODEL_CANDIDATES[0] if MODEL_CANDIDATES else MODEL_NAME)
 if GEMINI_API_KEY:
@@ -276,6 +287,39 @@ def strip_banned_greetings(s: str) -> str:
         if s.startswith(opener):
             s = s[len(opener):].lstrip(" ,।!-\n")
     return s
+
+_GENERIC_ERROR_TEXT = "মডেল থেকে উত্তর আনতে সমস্যা হয়েছে।"
+_TRUNCATED_ERROR_TEXT = "উত্তর টোকেন সীমা অতিক্রম করেছে। প্রশ্নটি একটু সংক্ষিপ্ত করে আবার চেষ্টা করুন।"
+_MAX_TOKENS_FINISH = {"MAX_TOKENS", 2}
+_MAX_TOKEN_RETRIES = 5
+
+
+def _extract_gemini_text(resp) -> str:
+    if not resp:
+        return ""
+    candidates = getattr(resp, "candidates", None) or []
+    for cand in candidates:
+        content = getattr(cand, "content", None)
+        parts = getattr(content, "parts", None) or []
+        fragments = []
+        for part in parts:
+            text = getattr(part, "text", None)
+            if text:
+                fragments.append(text)
+        if fragments:
+            return "".join(fragments).strip()
+    return ""
+
+
+def _get_finish_reason(resp):
+    if not resp:
+        return None
+    candidates = getattr(resp, "candidates", None) or []
+    for cand in candidates:
+        finish_reason = getattr(cand, "finish_reason", None)
+        if finish_reason is not None:
+            return finish_reason
+    return None
 
 # ---------- RAG helpers ----------
 
@@ -520,7 +564,10 @@ def retrieve_contexts(
     def keyword_hits(rec, tokens):
         if not tokens:
             return 0
-        text_norm = normalize_bangla_text(rec.get("text", ""))
+        text_norm = rec.get("_norm_text")
+        if text_norm is None:
+            text_norm = normalize_bangla_text(rec.get("text", ""))
+            rec["_norm_text"] = text_norm
         return sum(1 for kw in tokens if kw and kw in text_norm)
 
     if keywords:
@@ -532,12 +579,13 @@ def retrieve_contexts(
         has_keyword_match = any(keyword_hits(rec, normalized_keywords) > 0 for rec in aggregated.values())
         if not has_keyword_match:
             rescue_candidates = []
-            for idx, rec in enumerate(RAG_INDEX.get("records") or []):
-                if rec.get("source") not in matched_sources:
-                    continue
-                hits = keyword_hits(rec, normalized_keywords)
-                if hits:
-                    rescue_candidates.append((idx, hits, len(rec.get("text", ""))))
+            source_index = RAG_INDEX.get("source_index", {})
+            for src in matched_sources:
+                for idx in source_index.get(src, [])[:50]:
+                    rec = RAG_INDEX["records"][idx]
+                    hits = keyword_hits(rec, normalized_keywords)
+                    if hits:
+                        rescue_candidates.append((idx, hits, len(rec.get("text", ""))))
             rescue_candidates.sort(key=lambda x: (-x[1], x[2]))
             for idx, hits, _ in rescue_candidates[:max(top_k, 6)]:
                 if idx in aggregated:
@@ -690,9 +738,56 @@ def context_summary(records: List[dict]) -> str:
 # ---------- Tracing helpers are defined above ----------
 
 # ---------- Helpers: Google STT ----------
+def _convert_m4a_like_to_wav(audio_bytes: bytes, *, target_rate: int = 16000) -> bytes:
+    """Convert AAC/M4A-style audio into mono LINEAR16 WAV for Google STT."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found – cannot convert m4a audio")
+
+    src_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".m4a")
+    dst_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    try:
+        src_tmp.write(audio_bytes)
+        src_tmp.flush()
+        src_tmp.close()
+        dst_tmp.close()
+
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i",
+            src_tmp.name,
+            "-ac",
+            "1",
+            "-ar",
+            str(target_rate),
+            "-f",
+            "wav",
+            dst_tmp.name,
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", "ignore").strip()
+            raise RuntimeError(stderr or "ffmpeg conversion failed")
+
+        with open(dst_tmp.name, "rb") as f:
+            return f.read()
+    finally:
+        for temp_path in (src_tmp.name, dst_tmp.name):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
 def sniff_audio_format(b: bytes) -> str:
     if not b or len(b) < 4:
         return "unknown"
+    if len(b) >= 12 and b[4:8] == b"ftyp":
+        brand = b[8:12]
+        if brand[:2] in (b"M4", b"m4") or brand in (b"isom", b"mp42", b"MSNV", b"f4a "):
+            return "m4a"
+        return "mp4"
     sig4 = b[:4]
     if sig4 == b"OggS": return "ogg"
     if sig4 == b"RIFF" and b[8:12] == b"WAVE": return "wav"
@@ -841,18 +936,22 @@ def chat(req: ChatRequest):
     bangla_query = transliterate_to_bangla(user_msg)
 
     query_variants: List[str] = []
-    if bangla_query:
-        query_variants.append(bangla_query)
-    if user_msg and user_msg not in query_variants:
-        query_variants.append(user_msg)
+
+    def _append_variant(value: Optional[str]) -> None:
+        if not value:
+            return
+        value = value.strip()
+        if not value:
+            return
+        if value not in query_variants:
+            query_variants.append(value)
+
+    _append_variant(bangla_query)
+    _append_variant(user_msg)
     if not contains_bangla(user_msg):
         roman_lower = re.sub(r"[^a-z0-9\s]", " ", user_msg.lower())
         roman_lower = re.sub(r"\s+", " ", roman_lower).strip()
-        if roman_lower and roman_lower not in query_variants:
-            query_variants.append(roman_lower)
-
-    primary_query = query_variants[0] if query_variants else user_msg
-    alt_queries = query_variants[1:] if len(query_variants) > 1 else []
+        _append_variant(roman_lower)
 
     matched_sources, source_hits = _match_sources(bangla_query, user_msg)
 
@@ -902,6 +1001,14 @@ def chat(req: ChatRequest):
                     query_variants.append(tok_l)
 
     # Recompute primary/alt after expansion
+    deduped_variants: List[str] = []
+    for cand in query_variants:
+        if cand and cand not in deduped_variants:
+            deduped_variants.append(cand)
+        if len(deduped_variants) >= RAG_MAX_QUERY_VARIANTS:
+            break
+
+    query_variants = deduped_variants or [user_msg]
     primary_query = query_variants[0] if query_variants else user_msg
     alt_queries = query_variants[1:] if len(query_variants) > 1 else []
 
@@ -1000,34 +1107,62 @@ def chat(req: ChatRequest):
 
     text = None
     last_err = None
+    last_finish_reason = None
     models_to_try = GENERATIVE_MODELS or [genai.GenerativeModel(MODEL_NAME)]
     for model in models_to_try:
+        token_limit = GEMINI_MAX_OUTPUT_TOKENS
+        retries = 0
         try:
-            resp = model.generate_content(
-                [sys_prompt, user_prompt],
-                generation_config={"max_output_tokens": 200, "temperature": 0.4},
-            )
-            t = (getattr(resp, "text", None) or "").strip()
-            t = strip_banned_greetings(t)
-            if t:
-                text = t
-                model_used = getattr(model, "model_name", None) or model_used
+            while retries <= _MAX_TOKEN_RETRIES:
+                resp = model.generate_content(
+                    [sys_prompt, user_prompt],
+                    generation_config={
+                        "max_output_tokens": token_limit,
+                        "temperature": 0.4,
+                    },
+                )
+                last_finish_reason = _get_finish_reason(resp)
+                t = strip_banned_greetings(_extract_gemini_text(resp))
+                if t:
+                    text = t
+                    model_used = getattr(model, "model_name", None) or model_used
+                    break
+                if last_finish_reason in _MAX_TOKENS_FINISH and token_limit < GEMINI_MAX_OUTPUT_TOKENS_CAP:
+                    retries += 1
+                    token_limit = min(token_limit * 2, GEMINI_MAX_OUTPUT_TOKENS_CAP)
+                    last_err = ValueError("Gemini response truncated at token limit")
+                    continue
+                # either not truncated or already at cap
+                if last_finish_reason in _MAX_TOKENS_FINISH:
+                    last_err = ValueError(
+                        "Gemini response truncated at token limit (max cap reached)"
+                    )
+                break
+            if text:
                 break
         except Exception as e:
             last_err = e
+            last_finish_reason = None
             continue
 
     if not text:
-        print("Gemini error:", repr(last_err))
-        text = "মডেল থেকে উত্তর আনতে সমস্যা হয়েছে।"
+        if last_finish_reason in _MAX_TOKENS_FINISH:
+            print("Gemini response truncated at token limit", flush=True)
+            text = _TRUNCATED_ERROR_TEXT
+        else:
+            print("Gemini error:", repr(last_err))
+            text = _GENERIC_ERROR_TEXT
 
     audio_b64 = synthesize_tts(text, language=req.language or "bn-BD") if req.from_mic else None
+    status = "ok"
+    if not text or text in {_GENERIC_ERROR_TEXT, _TRUNCATED_ERROR_TEXT}:
+        status = "error"
     _trace_chat_csv({
         "ts": datetime.now(timezone.utc).isoformat(),
         "route": "/api/chat", "req_id": req_id, "from_mic": bool(req.from_mic),
         "lang": req.language or "bn-BD", "model": model_used, "latency_ms": int((time.time()-t0)*1000),
         "user_len": len(user_msg), "answer_len": len(text or ""),
-        "status": "ok" if text and text != "মডেল থেকে উত্তর আনতে সমস্যা হয়েছে।" else "error",
+        "status": status,
         "user": _sanitize_text(user_msg), "answer": _sanitize_text(text)
     })
     return {"answer": text, "audio_b64": audio_b64}
@@ -1036,8 +1171,8 @@ def chat(req: ChatRequest):
 @app.post("/api/stt")
 async def stt(request: Request, audio: UploadFile = File(...), lang: Optional[str] = Form("bn-BD")):
     """
-    Accepts audio (webm/ogg/wav/mp3). Returns {"text": "..."} via Google STT.
-    Add ?debug=1 to get detection info.
+    Accepts audio (webm/ogg/wav/mp3/m4a). M4A/AAC uploads are transcoded to WAV before
+    sending to Google STT. Add ?debug=1 to get detection info.
     """
     debug_mode = request.query_params.get("debug") == "1"
     try:
@@ -1048,10 +1183,49 @@ async def stt(request: Request, audio: UploadFile = File(...), lang: Optional[st
             return JSONResponse(resp, status_code=400)
 
         content_type = (audio.content_type or "").lower()
+        filename = (audio.filename or "").lower()
+
+        sniffed = sniff_audio_format(data)
+        converted_from = None
+
         if content_type == "video/webm":  # some webviews label mic as video/webm
             content_type = "audio/webm"
 
+        if (
+            "m4a" in filename
+            or "aac" in filename
+            or "mp4" in filename
+            or "m4a" in content_type
+            or "aac" in content_type
+            or "mp4" in content_type
+            or sniffed in {"m4a", "mp4"}
+        ):
+            try:
+                data = _convert_m4a_like_to_wav(data)
+                converted_from = sniffed or content_type or filename or "m4a"
+                content_type = "audio/wav"
+                sniffed = "wav"
+            except Exception as conv_err:
+                msg = "M4A অডিও রূপান্তর করা যায়নি।"
+                if debug_mode:
+                    return JSONResponse(
+                        {
+                            "error": msg,
+                            "debug": {
+                                "conversion_error": str(conv_err),
+                                "ctype": audio.content_type,
+                                "sniff": sniffed,
+                            },
+                        },
+                        status_code=500,
+                    )
+                return JSONResponse({"error": msg}, status_code=500)
+
         text, dbg = google_stt_bytes(data, content_type, language_code=lang or "bn-BD")
+        if debug_mode and converted_from:
+            dbg = dict(dbg)
+            dbg["converted_from"] = converted_from
+            dbg["post_conversion_type"] = content_type
         return {"text": text, **({"debug": dbg} if debug_mode else {})}
     except Exception as e:
         print("STT fatal error:", type(e).__name__, e)

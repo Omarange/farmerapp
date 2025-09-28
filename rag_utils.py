@@ -2,6 +2,7 @@ import json
 import os
 import re
 import unicodedata
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
@@ -62,18 +63,23 @@ def ensure_dir(path: os.PathLike) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
 
 
+@lru_cache(maxsize=2048)
+def _cached_embedding(model: str, payload: str) -> Tuple[float, ...]:
+    resp = genai.embed_content(model=model, content=payload or ".")
+    embedding = resp.get("embedding") or resp.get("vector") or resp
+    if isinstance(embedding, dict) and "embedding" in embedding:
+        embedding = embedding["embedding"]
+    if not isinstance(embedding, list):
+        raise ValueError("Unexpected embedding response format")
+    return tuple(float(x) for x in embedding)
+
+
 def embed_texts(texts: Iterable[str], *, model: str = EMBED_MODEL) -> np.ndarray:
-    """Return embeddings for each text using Gemini embedding API."""
-    vectors: List[List[float]] = []
+    """Return embeddings for each text using Gemini embedding API with simple caching."""
+    vectors: List[Tuple[float, ...]] = []
     for text in texts:
         payload = normalize_bangla_text(text)
-        resp = genai.embed_content(model=model, content=payload or ".")
-        embedding = resp.get("embedding") or resp.get("vector") or resp
-        if isinstance(embedding, dict) and "embedding" in embedding:
-            embedding = embedding["embedding"]
-        if not isinstance(embedding, list):
-            raise ValueError("Unexpected embedding response format")
-        vectors.append(embedding)
+        vectors.append(_cached_embedding(model, payload or "."))
     return np.asarray(vectors, dtype=np.float32)
 
 
@@ -97,11 +103,19 @@ def load_index(embeddings_path: str, metadata_path: str):
     embeddings = np.load(embeddings_path).astype(np.float32)
     with open(metadata_path, "r", encoding="utf-8") as f:
         records = json.load(f)
+    source_index = {}
+    for idx, rec in enumerate(records):
+        norm_text = normalize_bangla_text(rec.get("text", ""))
+        rec["_norm_text"] = norm_text
+        src = rec.get("source")
+        if src:
+            source_index.setdefault(src, []).append(idx)
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8
     return {
         "embeddings": embeddings,
         "records": records,
         "norms": norms,
+        "source_index": source_index,
     }
 
 
