@@ -48,8 +48,25 @@ function playBase64Mp3(b64){
   audioEl = new Audio("data:audio/mpeg;base64," + b64);
   audioEl.play().catch(()=>{});
 }
-function greeting(){
-  return "👋 স্বাগতম খুলনাবাসী! আগামীকাল আংশিক মেঘলা; হালকা বৃষ্টির সম্ভাবনা। তাপমাত্রা ২৪–৩১°C, বৃষ্টির সম্ভাবনা ~৭৭%";
+const DEFAULT_GREETING = "👋 স্বাগতম! আপনার ফসল, আবহাওয়া বা কৃষি সমস্যা লিখুন/বলুন—আমি ৩–৫টি সংক্ষিপ্ত, কাজে লাগার মতো পরামর্শ দেব।";
+
+async function fetchWeatherGreeting(){
+  try{
+    const res = await fetch("/api/weather");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    const msg = data && data.message;
+    if (typeof msg === "string" && msg.trim()) return msg.trim();
+  }catch(err){
+    console.warn("Weather greeting fetch failed", err);
+  }
+  return null;
+}
+
+async function renderInitialGreeting(){
+  const bubble = addBubble("bot", "আবহাওয়ার তথ্য নেওয়া হচ্ছে…");
+  const text = await fetchWeatherGreeting();
+  bubble.textContent = text || DEFAULT_GREETING;
 }
 
 async function sendMessage(text, fromMic=false){
@@ -409,5 +426,5 @@ btnStop.addEventListener("click", async ()=>{
   addBubble("bot","⏹ থেমে গেছে।");
 });
 
-// Initial greeting (unchanged)
-addBubble("bot", greeting());
+// Initial greeting
+renderInitialGreeting();

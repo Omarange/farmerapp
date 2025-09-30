@@ -9,7 +9,8 @@ import shutil
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Set
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from urllib.parse import quote
 import time
 import uuid
 import csv
@@ -23,6 +24,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from gtts import gTTS
 import google.generativeai as genai
+import requests
 
 import numpy as np
 
@@ -75,6 +77,15 @@ GEMINI_MAX_OUTPUT_TOKENS_CAP = _safe_int_env(
 
 # Optional: pin STT region (e.g., "asia-south1-speech.googleapis.com")
 GOOGLE_SPEECH_ENDPOINT = os.getenv("GOOGLE_SPEECH_ENDPOINT", "").strip()
+
+VISUALCROSSING_API_KEY = os.getenv("VISUALCROSSING_API_KEY", "").strip()
+VISUALCROSSING_LOCATION = os.getenv("VISUALCROSSING_LOCATION", "Khulna, Bangladesh").strip() or "Khulna, Bangladesh"
+VISUALCROSSING_DAYS_AHEAD = max(0, _safe_int_env("VISUALCROSSING_DAYS_AHEAD", 1))
+WEATHER_GREETING_PREFIX = os.getenv("WEATHER_GREETING_PREFIX", "👋 স্বাগতম খুলনাবাসী!").strip() or "👋 স্বাগতম খুলনাবাসী!"
+VISUALCROSSING_BASE_URL = os.getenv(
+    "VISUALCROSSING_BASE_URL",
+    "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline",
+).strip() or "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline"
 
 # ---------- Tracing (CSV) ----------
 def _truthy(s: str) -> bool:
@@ -250,6 +261,16 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     audio_b64: Optional[str] = None
+
+class WeatherResponse(BaseModel):
+    message: str
+    location: str
+    iso_date: Optional[str] = None
+    temp_min_c: Optional[float] = None
+    temp_max_c: Optional[float] = None
+    precip_probability: Optional[float] = None
+    source: str = "visualcrossing"
+    days_ahead: int = 1
 
 # ---------- Helpers: TTS ----------
 def synthesize_tts(text: str, language: str = "bn-BD") -> Optional[str]:
@@ -892,6 +913,245 @@ def google_stt_bytes(audio_bytes: bytes, content_type: str, language_code: str =
             debug["errors"].append(f"{label}: {type(e).__name__}: {e}")
 
     return "", debug
+
+# ---------- API: Weather (Visual Crossing) ----------
+_BN_DIGIT_MAP = str.maketrans("0123456789", "০১২৩৪৫৬৭৮৯")
+
+ICON_TRANSLATIONS = {
+    "clear-day": "দিনভর আকাশ পরিষ্কার থাকবে",
+    "clear-night": "রাতভর আকাশ পরিষ্কার থাকবে",
+    "partly-cloudy-day": "আংশিক মেঘলা থাকতে পারে",
+    "partly-cloudy-night": "রাতে আংশিক মেঘলা থাকতে পারে",
+    "cloudy": "আকাশ মেঘাচ্ছন্ন থাকবে",
+    "rain": "বৃষ্টির প্রবণতা থাকতে পারে",
+    "showers-day": "দমকা বৃষ্টির সম্ভাবনা রয়েছে",
+    "showers-night": "রাতে দমকা বৃষ্টির সম্ভাবনা রয়েছে",
+    "thunderstorm": "বজ্রসহ বৃষ্টির প্রবল সম্ভাবনা রয়েছে",
+    "snow": "তুষারপাতের সম্ভাবনা রয়েছে",
+    "snow-showers-day": "দমকা তুষারপাতের সম্ভাবনা রয়েছে",
+    "snow-showers-night": "রাতে দমকা তুষারপাতের সম্ভাবনা রয়েছে",
+    "sleet": "শিলাবৃষ্টির সম্ভাবনা রয়েছে",
+    "rain-snow": "বৃষ্টি ও তুষারপাতের মিশ্রণ হতে পারে",
+    "rain-sleet": "বৃষ্টি ও শিলাবৃষ্টি হতে পারে",
+    "snow-sleet": "তুষার ও শিলাবৃষ্টি হতে পারে",
+    "wind": "ঝড়ো হাওয়া বইতে পারে",
+    "fog": "কুয়াশা থাকতে পারে",
+}
+
+PRECIPTYPE_TRANSLATIONS = {
+    "rain": "বৃষ্টি হতে পারে",
+    "snow": "তুষারপাত হতে পারে",
+    "sleet": "শিলাবৃষ্টি হতে পারে",
+    "hail": "শিলাবৃষ্টির সম্ভাবনা রয়েছে",
+}
+
+CONDITION_PHRASES = [
+    ("severe thunderstorms", "প্রবল বজ্রসহ বৃষ্টির সম্ভাবনা রয়েছে"),
+    ("strong storms", "প্রবল ঝড়ের সম্ভাবনা রয়েছে"),
+    ("thunderstorms", "বজ্রসহ বৃষ্টির সম্ভাবনা রয়েছে"),
+    ("thunderstorm", "বজ্রসহ বৃষ্টির সম্ভাবনা রয়েছে"),
+    ("lightning", "বজ্রপাতের সম্ভাবনা রয়েছে"),
+    ("heavy rain", "ভারী বৃষ্টির সম্ভাবনা রয়েছে"),
+    ("moderate rain", "মাঝারি বৃষ্টির সম্ভাবনা রয়েছে"),
+    ("light rain", "হালকা বৃষ্টির সম্ভাবনা রয়েছে"),
+    ("showers", "দমকা দমকা বৃষ্টির সম্ভাবনা রয়েছে"),
+    ("drizzle", "গুঁড়ি গুঁড়ি বৃষ্টির সম্ভাবনা রয়েছে"),
+    ("rain", "বৃষ্টির সম্ভাবনা রয়েছে"),
+    ("snow", "তুষারপাতের সম্ভাবনা থাকতে পারে"),
+    ("sleet", "শিলাবৃষ্টির সম্ভাবনা রয়েছে"),
+    ("hail", "শিলাবৃষ্টির সম্ভাবনা রয়েছে"),
+    ("ice", "বরফ জমতে পারে"),
+    ("fog", "কুয়াশা থাকতে পারে"),
+    ("mist", "হালকা কুয়াশা থাকতে পারে"),
+    ("overcast", "আকাশ সম্পূর্ণ মেঘাচ্ছন্ন থাকতে পারে"),
+    ("mostly cloudy", "অধিকাংশ সময় মেঘলা থাকবে"),
+    ("partly cloudy", "আংশিক মেঘলা থাকতে পারে"),
+    ("cloudy", "আকাশ মেঘলা থাকতে পারে"),
+    ("clear", "আকাশ পরিষ্কার থাকবে"),
+    ("sunny", "রৌদ্রোজ্জ্বল থাকবে"),
+    ("hot", "গরম অনুভূত হবে"),
+    ("cold", "ঠান্ডা অনুভূত হবে"),
+    ("windy", "ঝড়ো হাওয়া থাকতে পারে"),
+    ("breezy", "দমকা হাওয়া বইতে পারে"),
+    ("humid", "আর্দ্রতা বেশি থাকবে"),
+    ("dry", "আবহাওয়া শুষ্ক থাকবে"),
+]
+
+GENERAL_CONDITION_PHRASES = [
+    ("throughout the day", "সারাদিন এই পরিস্থিতি থাকতে পারে"),
+    ("through the day", "সারাদিন এই পরিস্থিতি থাকতে পারে"),
+    ("throughout the night", "রাতভর একই পরিস্থিতি থাকতে পারে"),
+    ("overnight", "রাতভর একই পরিস্থিতি থাকতে পারে"),
+    ("early morning", "ভোরের দিকে বেশি প্রভাব দেখা যেতে পারে"),
+]
+
+
+def _translated_condition_segments(day: Dict[str, object]) -> List[str]:
+    segments: List[str] = []
+    icon = str((day.get("icon") or "")).strip().lower()
+    icon_translation = ICON_TRANSLATIONS.get(icon)
+    if icon_translation:
+        segments.append(icon_translation)
+
+    conditions_raw = str(day.get("description") or day.get("conditions") or "")
+    lower = conditions_raw.lower()
+    text_for_matching = lower
+    for key, translation in CONDITION_PHRASES:
+        if key in text_for_matching and translation not in segments:
+            segments.append(translation)
+            text_for_matching = text_for_matching.replace(key, " ")
+
+    preciptype = day.get("preciptype")
+    if isinstance(preciptype, (list, tuple, set)):
+        items = preciptype
+    elif preciptype:
+        items = [preciptype]
+    else:
+        items = []
+    for item in items:
+        name = str(item or "").strip().lower()
+        translation = PRECIPTYPE_TRANSLATIONS.get(name)
+        if translation and translation not in segments:
+            segments.append(translation)
+
+    for key, translation in GENERAL_CONDITION_PHRASES:
+        if key in lower and translation not in segments:
+            segments.append(translation)
+
+    cleaned: List[str] = []
+    for seg in segments:
+        seg = seg.strip()
+        if seg and seg not in cleaned:
+            cleaned.append(seg)
+
+    if not cleaned:
+        cleaned.append("আবহাওয়ার বিস্তারিত তথ্য পাওয়া যায়নি")
+
+    return cleaned
+
+def _safe_float(value: Optional[float]) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bn_int_str(value: Optional[float]) -> Optional[str]:
+    val = _safe_float(value)
+    if val is None:
+        return None
+    return str(int(round(val))).translate(_BN_DIGIT_MAP)
+
+
+def _day_label_bn(days_ahead: int) -> str:
+    if days_ahead <= 0:
+        return "আজ"
+    if days_ahead == 1:
+        return "আগামীকাল"
+    number = _bn_int_str(days_ahead) or str(days_ahead)
+    return f"{number} দিন পরে"
+
+
+def _fetch_visualcrossing_day(location: str, days_ahead: int):
+    encoded_location = quote(location, safe="")
+    url = f"{VISUALCROSSING_BASE_URL}/{encoded_location}"
+    params = {
+        "unitGroup": "metric",
+        "include": "days",
+        "lang": "bn",
+        "key": VISUALCROSSING_API_KEY,
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=8)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Weather API request failed: {exc}") from exc
+    if resp.status_code != 200:
+        detail = resp.text.strip()
+        raise HTTPException(status_code=resp.status_code, detail=f"Weather API error: {detail[:200]}")
+    data = resp.json()
+    days = data.get("days") or []
+    if not days:
+        raise HTTPException(status_code=502, detail="Weather API response missing day data")
+
+    if days_ahead >= len(days):
+        raise HTTPException(status_code=502, detail="Weather API did not return enough days of forecast")
+
+    day = days[days_ahead]
+    iso_date = day.get("datetime")
+    if not iso_date and day.get("datetimeEpoch"):
+        try:
+            iso_date = datetime.fromtimestamp(float(day["datetimeEpoch"]), timezone.utc).date().isoformat()
+        except Exception:
+            iso_date = None
+
+    return day, iso_date
+
+
+def _build_weather_message_bn(days_ahead: int, day: Dict[str, object]):
+    day_label = _day_label_bn(days_ahead)
+    condition_segments = _translated_condition_segments(day)[:3]
+    primary = condition_segments[0] if condition_segments else "আবহাওয়ার তথ্য"
+    cond_parts = [f"{day_label} {primary}"]
+    if len(condition_segments) > 1:
+        cond_parts.extend(condition_segments[1:])
+    cond_segment = "; ".join([part.strip() for part in cond_parts if part.strip()])
+
+    temp_min = _safe_float(day.get("tempmin"))
+    temp_max = _safe_float(day.get("tempmax"))
+    precip_prob = _safe_float(day.get("precipprob"))
+
+    detail_parts = []
+    min_str = _bn_int_str(temp_min)
+    max_str = _bn_int_str(temp_max)
+    precip_str = _bn_int_str(precip_prob)
+    if min_str and max_str:
+        detail_parts.append(f"তাপমাত্রা {min_str}–{max_str}°C")
+    elif max_str:
+        detail_parts.append(f"সর্বোচ্চ {max_str}°C")
+    elif min_str:
+        detail_parts.append(f"সর্বনিম্ন {min_str}°C")
+    if precip_str:
+        detail_parts.append(f"বৃষ্টির সম্ভাবনা ~{precip_str}%")
+
+    message_parts = [cond_segment] if cond_segment else []
+    if detail_parts:
+        message_parts.append(", ".join(detail_parts))
+
+    message = f"{WEATHER_GREETING_PREFIX} {'; '.join(message_parts)}" if message_parts else WEATHER_GREETING_PREFIX
+    if not message.endswith(("।", ".", "!", "?")):
+        message += "।"
+
+    return message, temp_min, temp_max, precip_prob
+
+
+@app.get("/api/weather", response_model=WeatherResponse)
+def get_weather(location: Optional[str] = None, days_ahead: Optional[int] = None):
+    if not VISUALCROSSING_API_KEY:
+        raise HTTPException(status_code=500, detail="VISUALCROSSING_API_KEY not configured")
+
+    effective_location = (location or VISUALCROSSING_LOCATION).strip() or "Khulna, Bangladesh"
+    if days_ahead is None:
+        days = VISUALCROSSING_DAYS_AHEAD
+    else:
+        try:
+            days = max(0, int(days_ahead))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="days_ahead must be an integer")
+
+    day_data, iso_date = _fetch_visualcrossing_day(effective_location, days)
+    message, temp_min, temp_max, precip_prob = _build_weather_message_bn(days, day_data)
+
+    return WeatherResponse(
+        message=message,
+        location=effective_location,
+        iso_date=iso_date,
+        temp_min_c=temp_min,
+        temp_max_c=temp_max,
+        precip_probability=precip_prob,
+        source="visualcrossing",
+        days_ahead=days,
+    )
+
 
 # ---------- API: Chat (same prompt/behavior as your previous one) ----------
 @app.post("/api/chat", response_model=ChatResponse)
