@@ -64,9 +64,32 @@ async function fetchWeatherGreeting(){
 }
 
 async function renderInitialGreeting(){
-  const bubble = addBubble("bot", "আবহাওয়ার তথ্য নেওয়া হচ্ছে…");
-  const text = await fetchWeatherGreeting();
-  bubble.textContent = text || DEFAULT_GREETING;
+  const placeholder = addBubble("bot", "আবহাওয়ার তথ্য নেওয়া হচ্ছে…");
+  let pendingText = null;
+  let timerFired = false;
+  let resultBubble = null;
+
+  const showResult = () => {
+    if (timerFired) return;
+    timerFired = true;
+    if (placeholder && placeholder.parentNode){ placeholder.remove(); }
+    const text = (pendingText && pendingText.trim()) ? pendingText.trim() : DEFAULT_GREETING;
+    resultBubble = addBubble("bot", text);
+    if (pendingText) resultBubble.dataset.weatherGreeting = '1';
+  };
+
+  setTimeout(showResult, 4000);
+
+  const fetched = await fetchWeatherGreeting();
+  if (fetched && fetched.trim()){
+    pendingText = fetched.trim();
+    if (timerFired && resultBubble){
+      resultBubble.textContent = pendingText;
+      resultBubble.dataset.weatherGreeting = '1';
+    }
+  } else if (timerFired && resultBubble){
+    resultBubble.textContent = DEFAULT_GREETING;
+  }
 }
 
 async function sendMessage(text, fromMic=false){

@@ -6,15 +6,17 @@ import re
 import subprocess
 import tempfile
 import shutil
+import asyncio
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Set
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time as dt_time
 from urllib.parse import quote
 import time
 import uuid
 import csv
 import threading
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,6 +68,19 @@ def _safe_int_env(name: str, default: int) -> int:
         print(f"Invalid int for {name}: {raw!r}; using {default}", flush=True)
         return default
 
+def _safe_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"Invalid float for {name}: {raw!r}; using {default}", flush=True)
+        return default
+
+def _truthy(s: str) -> bool:
+    return str(s or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
 # Force the canonical Gemini model for all usage.
 MODEL_NAME = "gemini-2.5-flash"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -86,11 +101,11 @@ VISUALCROSSING_BASE_URL = os.getenv(
     "VISUALCROSSING_BASE_URL",
     "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline",
 ).strip() or "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline"
+VISUALCROSSING_DEFAULT_TIMEZONE = os.getenv("VISUALCROSSING_DEFAULT_TIMEZONE", "Asia/Dhaka").strip() or "Asia/Dhaka"
+VISUALCROSSING_PREFETCH_ON_START = _truthy(os.getenv("VISUALCROSSING_PREFETCH_ON_START", "1"))
+WEATHER_API_DELAY_SECONDS = max(0.0, _safe_float_env("WEATHER_API_DELAY_SECONDS", 0.0))
 
 # ---------- Tracing (CSV) ----------
-def _truthy(s: str) -> bool:
-    return str(s or "").strip().lower() in {"1", "true", "yes", "y", "on"}
-
 TRACE_CHAT = _truthy(os.getenv("TRACE_CHAT", "0"))
 _DEFAULT_TRACE_PATH = "/data/chat_traces.csv" if os.path.isdir("/data") else ""
 TRACE_CSV_PATH = os.getenv("TRACE_CSV_PATH", _DEFAULT_TRACE_PATH).strip()
@@ -99,6 +114,11 @@ _TRACE_HEADER = [
     "ts", "route", "req_id", "from_mic", "lang", "model", "latency_ms",
     "user_len", "answer_len", "status", "user", "answer"
 ]
+
+_WEATHER_CACHE_LOCK = threading.Lock()
+_WEATHER_FETCH_LOCK = threading.Lock()
+_WEATHER_CACHE: Dict[str, object] = {}
+_WEATHER_REFRESH_TIMER: Optional[threading.Timer] = None
 
 USE_LLM_TRANSLIT = _truthy(os.getenv("USE_LLM_TRANSLIT", "0"))
 
@@ -1084,7 +1104,121 @@ def _fetch_visualcrossing_day(location: str, days_ahead: int):
         except Exception:
             iso_date = None
 
-    return day, iso_date
+    timezone_name = data.get("timezone") or ""
+
+    return day, iso_date, timezone_name
+
+
+def _resolve_weather_timezone(tz_name: Optional[str]) -> ZoneInfo:
+    candidates = []
+    if tz_name:
+        candidates.append(str(tz_name))
+    if VISUALCROSSING_DEFAULT_TIMEZONE:
+        candidates.append(str(VISUALCROSSING_DEFAULT_TIMEZONE))
+    candidates.append("UTC")
+    for name in candidates:
+        if not name:
+            continue
+        try:
+            return ZoneInfo(str(name))
+        except Exception:
+            continue
+    return ZoneInfo("UTC")
+
+
+
+def _schedule_weather_refresh_locked(location: str, days_ahead: int, next_refresh_utc: Optional[datetime]):
+    global _WEATHER_REFRESH_TIMER
+    if _WEATHER_REFRESH_TIMER:
+        try:
+            _WEATHER_REFRESH_TIMER.cancel()
+        except Exception:
+            pass
+        _WEATHER_REFRESH_TIMER = None
+    if not next_refresh_utc:
+        return
+    delay = (next_refresh_utc - datetime.now(timezone.utc)).total_seconds()
+    if delay < 60:
+        delay = 60
+
+    def _trigger():
+        try:
+            _refresh_weather(location, days_ahead)
+        except Exception as exc:
+            print("Weather auto-refresh failed:", exc, flush=True)
+            with _WEATHER_CACHE_LOCK:
+                retry_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+                _schedule_weather_refresh_locked(location, days_ahead, retry_at)
+
+    timer = threading.Timer(delay, _trigger)
+    timer.daemon = True
+    timer.start()
+    _WEATHER_REFRESH_TIMER = timer
+
+
+
+def _refresh_weather(location: str, days_ahead: int) -> WeatherResponse:
+    with _WEATHER_FETCH_LOCK:
+        day_data, iso_date, timezone_name = _fetch_visualcrossing_day(location, days_ahead)
+        message, temp_min, temp_max, precip_prob = _build_weather_message_bn(days_ahead, day_data)
+        response = WeatherResponse(
+            message=message,
+            location=location,
+            iso_date=iso_date,
+            temp_min_c=temp_min,
+            temp_max_c=temp_max,
+            precip_probability=precip_prob,
+            source="visualcrossing",
+            days_ahead=days_ahead,
+        )
+        tz = _resolve_weather_timezone(timezone_name)
+        now_local = datetime.now(tz)
+        next_midnight_local = datetime.combine(now_local.date() + timedelta(days=1), dt_time.min, tz)
+        next_refresh_utc = next_midnight_local.astimezone(timezone.utc)
+        cache_entry = {
+            "response": response,
+            "location": location,
+            "days_ahead": days_ahead,
+            "iso_date": iso_date,
+            "timezone": getattr(tz, "key", timezone_name) or timezone_name or str(tz),
+            "fetched_at": datetime.now(timezone.utc),
+            "next_refresh_utc": next_refresh_utc,
+        }
+        with _WEATHER_CACHE_LOCK:
+            global _WEATHER_CACHE
+            _WEATHER_CACHE = cache_entry
+            _schedule_weather_refresh_locked(location, days_ahead, next_refresh_utc)
+        return response
+
+
+
+def _get_cached_weather(location: str, days_ahead: int) -> WeatherResponse:
+    now_utc = datetime.now(timezone.utc)
+    with _WEATHER_CACHE_LOCK:
+        cache = _WEATHER_CACHE or {}
+        if (
+            cache.get("response")
+            and cache.get("location") == location
+            and cache.get("days_ahead") == days_ahead
+        ):
+            next_refresh = cache.get("next_refresh_utc")
+            if isinstance(next_refresh, datetime) and now_utc < next_refresh:
+                return cache["response"]
+    return _refresh_weather(location, days_ahead)
+
+
+
+def _maybe_prefetch_weather():
+    if not VISUALCROSSING_API_KEY or not VISUALCROSSING_PREFETCH_ON_START:
+        return
+
+    def _task():
+        try:
+            _refresh_weather(VISUALCROSSING_LOCATION, VISUALCROSSING_DAYS_AHEAD)
+        except Exception as exc:
+            print("Initial weather fetch failed:", exc, flush=True)
+
+    threading.Thread(target=_task, daemon=True).start()
 
 
 def _build_weather_message_bn(days_ahead: int, day: Dict[str, object]):
@@ -1125,7 +1259,7 @@ def _build_weather_message_bn(days_ahead: int, day: Dict[str, object]):
 
 
 @app.get("/api/weather", response_model=WeatherResponse)
-def get_weather(location: Optional[str] = None, days_ahead: Optional[int] = None):
+async def get_weather(location: Optional[str] = None, days_ahead: Optional[int] = None):
     if not VISUALCROSSING_API_KEY:
         raise HTTPException(status_code=500, detail="VISUALCROSSING_API_KEY not configured")
 
@@ -1138,19 +1272,17 @@ def get_weather(location: Optional[str] = None, days_ahead: Optional[int] = None
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="days_ahead must be an integer")
 
-    day_data, iso_date = _fetch_visualcrossing_day(effective_location, days)
-    message, temp_min, temp_max, precip_prob = _build_weather_message_bn(days, day_data)
+    weather = _get_cached_weather(effective_location, days)
+    if WEATHER_API_DELAY_SECONDS > 0:
+        await asyncio.sleep(WEATHER_API_DELAY_SECONDS)
+    return weather.copy()
 
-    return WeatherResponse(
-        message=message,
-        location=effective_location,
-        iso_date=iso_date,
-        temp_min_c=temp_min,
-        temp_max_c=temp_max,
-        precip_probability=precip_prob,
-        source="visualcrossing",
-        days_ahead=days,
-    )
+
+if VISUALCROSSING_API_KEY and VISUALCROSSING_PREFETCH_ON_START:
+    try:
+        _maybe_prefetch_weather()
+    except Exception as exc:
+        print("Weather prefetch setup failed:", exc, flush=True)
 
 
 # ---------- API: Chat (same prompt/behavior as your previous one) ----------
